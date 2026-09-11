@@ -7,7 +7,11 @@
         .\build.ps1
 
     产物：
-        .\package\    ← 可直接运行的安装包（含 安装.ps1 / 卸载.ps1）
+        .\package\    ← 直接拷进游戏根目录即可用
+
+    安装包不含安装程序：补丁是 BepInEx 运行时挂载的，不修改游戏文件，
+    安装就是「把 package\ 里的东西拷进有 TransparentHer.exe 的那一层」。
+    手写说明见 package\安装说明.txt。
 #>
 [CmdletBinding()]
 param(
@@ -86,8 +90,8 @@ Ok $pluginDll
 # ------------------------------------------------------------
 Step "5/5  组装安装包"
 $pkg = Join-Path $mod "package"
-# 保留三个自产文件，其余重建
-$keep = @("安装.ps1", "卸载.ps1", "安装说明.txt")
+# 保留自产的说明文件，其余重建
+$keep = @("安装说明.txt")
 $saved = @{}
 foreach ($k in $keep) {
     $p = Join-Path $pkg $k
@@ -110,4 +114,4 @@ Copy-Item $nvdaDll.FullName -Destination (Join-Path $pkg "nvdaControllerClient.d
 $n = (Get-ChildItem $pkg -Recurse -File -Force).Count
 Ok "安装包就绪：$pkg（$n 个文件）"
 
-Write-Host "`n构建完成。安装：`n    $pkg\安装.ps1`n" -ForegroundColor Cyan
+Write-Host "`n构建完成。安装：把 $pkg 里的东西全部拷进游戏根目录（有 TransparentHer.exe 的那一层）。`n" -ForegroundColor Cyan

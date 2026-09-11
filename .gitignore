@@ -33,11 +33,12 @@ verify/
 /mod/nvda_dl/
 /mod/*.zip
 
-# 安装包目录只保留三个自产文件；BepInEx 运行时、NVDA 客户端 DLL
-# 等第三方二进制由 mod/build.ps1 重新组装
+# 安装包目录只保留自产的说明文件；BepInEx 运行时、NVDA 客户端 DLL
+# 等第三方二进制由 mod/build.ps1 重新组装。
+#
+# 这里没有安装程序：补丁是 BepInEx 运行时挂载的，不修改游戏文件，
+# 安装就是「把 package\ 里的东西拷进游戏根目录」，手写说明足够。
 /mod/package/*
-!/mod/package/安装.ps1
-!/mod/package/卸载.ps1
 !/mod/package/安装说明.txt
 
 # ------------------------------------------------------------

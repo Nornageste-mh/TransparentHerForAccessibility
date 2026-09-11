@@ -1,10 +1,17 @@
 ﻿#Requires -Version 5.1
 <#
-    提交前安全闸门：确认暂存区里没有任何游戏版权内容或第三方二进制。
+    提交前安全闸门：
+      1. 确认暂存区里没有任何游戏版权内容或第三方二进制；
+      2. 确认暂存的 .ps1 都带 UTF-8 BOM。
 
-    背景：本仓库的分析产物（提取的剧本文本、反编译的游戏代码）属于游戏
+    背景一：本仓库的分析产物（提取的剧本文本、反编译的游戏代码）属于游戏
     著作权人的资产，一旦提交并推送即构成再分发。这个检查曾抓到
     mod/verify/ 目录漏网（.gitignore 只写了根级 /verify/）。
+
+    背景二：Windows PowerShell 5.1 读取**无 BOM** 的 .ps1 时按系统 ANSI
+    代码页（这里是 GBK）解码，中文注释会变乱码并直接导致语法错误，
+    脚本整个跑不起来。而不少编辑器/工具保存 UTF-8 时不写 BOM ——
+    mod/build.ps1 就这样坏过一次。所以在这里挡住。
 
     用法：
         .\tools\check-staged.ps1          # 检查
@@ -47,6 +54,21 @@ try {
         if ($forbiddenExt -contains $ext) { $violations += "$f   (禁用扩展名: $ext)" }
     }
 
+    # .ps1 必须带 UTF-8 BOM，否则 PowerShell 5.1 按 GBK 读，中文直接炸
+    # 注意：这里必须用 Join-Path 拼成绝对路径。git 给的是相对仓库根的路径，
+    # 而 [System.IO.File] 系列用的是 **.NET 进程当前目录**，Push-Location
+    # 只改 PowerShell 的位置，两者不是一回事 —— 直接用相对路径会去找会话
+    # 工作目录下的同名文件，报 Could not find a part of the path。
+    $noBom = @()
+    foreach ($f in $staged) {
+        if ([System.IO.Path]::GetExtension($f).ToLower() -ne '.ps1') { continue }
+        $abs = Join-Path $root $f
+        if (-not (Test-Path -LiteralPath $abs)) { continue }   # 已删除的文件跳过
+        $bytes = [System.IO.File]::ReadAllBytes($abs)
+        $hasBom = ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
+        if (-not $hasBom) { $noBom += $f }
+    }
+
     Write-Host "暂存文件数: $($staged.Count)" -ForegroundColor Gray
     if ($violations.Count -gt 0) {
         Write-Host "`n禁止提交以下内容：" -ForegroundColor Red
@@ -56,6 +78,15 @@ try {
         exit 1
     }
 
-    Write-Host "通过：暂存区没有版权内容或二进制。" -ForegroundColor Green
+    if ($noBom.Count -gt 0) {
+        Write-Host "`n以下 .ps1 缺少 UTF-8 BOM：" -ForegroundColor Red
+        $noBom | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+        Write-Host "`nWindows PowerShell 5.1 会把无 BOM 的文件按 GBK 解码，" -ForegroundColor Red
+        Write-Host "中文注释变乱码并直接语法错误。补 BOM：" -ForegroundColor Red
+        Write-Host '  $b=[IO.File]::ReadAllBytes($f); [IO.File]::WriteAllBytes($f, [byte[]](0xEF,0xBB,0xBF)+$b)' -ForegroundColor DarkGray
+        exit 1
+    }
+
+    Write-Host "通过：暂存区没有版权内容或二进制，.ps1 的 BOM 也都在。" -ForegroundColor Green
     exit 0
 } finally { Pop-Location }

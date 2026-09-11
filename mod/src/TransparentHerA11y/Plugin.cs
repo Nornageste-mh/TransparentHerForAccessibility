@@ -13,7 +13,7 @@ using UnityEngine.UI;
 
 namespace TransparentHerA11y
 {
-    [BepInPlugin(Guid, "TransparentHer A11y Reader", "0.5.0")]
+    [BepInPlugin(Guid, "TransparentHer A11y Reader", "0.5.1")]
     public class Plugin : BaseUnityPlugin
     {
         public const string Guid = "transparenther.a11y.reader";
@@ -68,7 +68,10 @@ namespace TransparentHerA11y
                 "  上 / 下      上一项 / 下一项\n" +
                 "  左 / 右      调整滑条\n" +
                 "  回车 / 空格  激活（按钮点击、开关切换、输入框聚焦）\n" +
-                "  Home / End   跳到第一项 / 最后一项");
+                "  Home / End   跳到第一项 / 最后一项\n" +
+                "回车 / 空格的归属：只有「导航模式下且有选中项」时才是激活控件；\n" +
+                "其余情况（非导航模式、或导航模式下没有可用项）一律归还给游戏，\n" +
+                "也就是照常推进剧情。");
 
             // 挑选语音后端：Tolk > NVDA > SAPI
             try
@@ -100,6 +103,12 @@ namespace TransparentHerA11y
         {
             try
             {
+                // 无条件执行：uGUI 那条「回车/空格 → submit 给当前选中对象」的
+                // 通路必须一直关着。否则鼠标点过 / 导航过 / 游戏自己 Select() 过的
+                // 控件，会在玩家按空格推进剧情时被顺手再点一次。
+                // 详见 UiNav.KeepUnitySubmitOff 的注释。
+                UiNav.KeepUnitySubmitOff();
+
                 // 导航模式优先：开启时按键归它处理，避免与选项数字键互相干扰
                 if (CfgMenuNav != null && CfgMenuNav.Value) UiNav.Update();
                 if (!UiNav.Active) Reader.Update();
@@ -635,6 +644,34 @@ namespace TransparentHerA11y
         {
             Reader.OnPhoneChoices(__instance);
             Reader.AnnounceChoices();
+        }
+
+        // ---- 按键归属：拦住游戏自己那次多余的推进 ----
+
+        /// <summary>
+        /// 回车/空格在导航模式里归我们（激活选中控件）。但游戏的两个管理器
+        /// 各自在 Update 里也读同一个按键推进剧情，于是同一次按键会做两件事：
+        /// 既激活了控件，又推进了一句剧情。
+        ///
+        /// 这里只拦「那一帧的那一次按键」，并且放行我们自己激活控件时引发的
+        /// 推进（例如全屏热区按钮）。判定全部在 UiNav.BlockGameAdvance 里，
+        /// 不依赖两个 Update 谁先执行。
+        ///
+        /// 注意：DialogueButtonClicked 返回 void，Prefix 返回 false 跳过它是安全的。
+        /// （对比 AutoDestroyAfterTime 是迭代器方法，跳过它会让调用方拿到 null。）
+        /// </summary>
+        [HarmonyPatch(typeof(DialogueSceneManager), "DialogueButtonClicked", new Type[] { })]
+        [HarmonyPrefix]
+        internal static bool BlockAdvanceDialog()
+        {
+            return !UiNav.BlockGameAdvance;
+        }
+
+        [HarmonyPatch(typeof(Ending2DialogueManager), "DialogueButtonClicked", new Type[] { })]
+        [HarmonyPrefix]
+        internal static bool BlockAdvanceEnding2()
+        {
+            return !UiNav.BlockGameAdvance;
         }
 
         [HarmonyPatch(typeof(PhoneDialogueManager), "StopAndClearDialogue", new Type[] { })]

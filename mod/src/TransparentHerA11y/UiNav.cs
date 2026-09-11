@@ -19,6 +19,16 @@ namespace TransparentHerA11y
     ///   Home / End   第一项 / 最后一项
     ///   PageUp/PageDown  切换面板组（默认只导航最上层那一组）
     ///
+    /// === 回车 / 空格的归属（状态机，见 F）===
+    ///
+    ///   非导航模式                      → 不归我们，交给游戏推进剧情
+    ///   导航模式 + 当前没有可用控件      → 退出导航，交回游戏推进剧情
+    ///   导航模式 + 当前有可用控件        → 归我们，激活该控件
+    ///
+    ///   判定点是「本帧开始时导航模式是否有效且选中项还活着」，
+    ///   而不是「EventSystem 里有没有选中对象」—— 后者会被鼠标点击和
+    ///   游戏的 AutoFocusInputField 干扰，不能用来决定按键归属。
+    ///
     /// === 设计约束（每条都对应一次实测故障）===
     ///
     /// A) 【只导航最上层面板组】
@@ -49,10 +59,24 @@ namespace TransparentHerA11y
     ///
     /// E) 【恢复视觉反馈】
     ///    用 EventSystem.SetSelectedGameObject 让游戏自己的按钮高亮态生效。
-    ///    为避免 Unity 的 StandaloneInputModule 再对回车/空格自动提交
-    ///    （那会和我们的直接 Invoke 重复触发），导航模式期间把
-    ///    sendNavigationEvents 置 false —— 但退出时必须还原，
-    ///    场景切换时也一并还原，否则新场景 UI 提交会失效。
+    ///
+    /// F) 【按键归属必须是显式的，不能靠「有没有选中对象」推断】
+    ///    实测：退出导航模式后按空格推进剧情，会把上一次导航到的那个按钮
+    ///    又点一遍。原因是 EventSystem.currentSelectedGameObject 在我们退出后
+    ///    仍然指着那个按钮，而 StandaloneInputModule 一见回车/空格就向它发
+    ///    submit。鼠标点过的按钮同理（Selectable.OnPointerDown 会自动选中自己）。
+    ///
+    ///    现在改成两件事：
+    ///      1) 常驻把 EventSystem.sendNavigationEvents 置 false（见 KeepUnitySubmitOff），
+    ///         让 uGUI 那条 submit 通路彻底不存在；
+    ///      2) 回车/空格在我们自己手里时才算「提交」（见 Update 里的状态机），
+    ///         并且同一帧拦住游戏自身那次多余的推进（见 BlockGameAdvance）。
+    ///
+    ///    为什么常驻关闭 submit 是安全的：全游戏代码里没有任何一处
+    ///    SetSelectedGameObject，游戏自己并不依赖 EventSystem 选中态；
+    ///    它的剧情推进、输入框确认、Esc 返回全部是自己读 Input.GetKeyDown。
+    ///    鼠标点按走 pointer 事件，不受这个开关影响。
+    ///    游戏自己播视频时也用同一个开关关掉提交（VideoPanelManager）。
     /// </summary>
     internal static class UiNav
     {
@@ -72,9 +96,12 @@ namespace TransparentHerA11y
         private static int _index;
         private static int _pendingRescanFrame = -1;
 
-        // 视觉反馈用：导航模式期间关掉 Unity 自带的导航提交
-        private static bool _savedSendNav = true;
-        private static bool _sendNavSaved;
+        // 视觉反馈用：我们自己借 EventSystem 选中过的对象，退出时要清掉
+        private static GameObject _selectedByUs;
+
+        // 「提交键」状态机：本帧是否已由我们处理，以及是否正在执行我们发起的动作
+        private static int _submitHandledFrame = -1;
+        private static bool _inOurActivation;
 
         // 场景切换防护
         private static int _lastSceneHandle = int.MinValue;
@@ -108,7 +135,6 @@ namespace TransparentHerA11y
 
             _active = true;
             _index = 0;
-            SuppressUnitySubmit(true);
             AnnounceGroup(true);
         }
 
@@ -118,7 +144,7 @@ namespace TransparentHerA11y
             Groups.Clear();
             _index = 0;
             _pendingRescanFrame = -1;
-            SuppressUnitySubmit(false);
+            ReleaseSelection();
             if (announce)
             {
                 try { Speech.Speak("已退出导航模式。", true); } catch { }
@@ -126,27 +152,67 @@ namespace TransparentHerA11y
         }
 
         /// <summary>
-        /// 导航模式期间关掉 Unity 的导航提交事件，避免 StandaloneInputModule
-        /// 对回车/空格二次提交（与我们直接 Invoke 冲突）。退出/切场景必须还原。
+        /// 常驻关掉 uGUI 的键盘导航/提交通路。
+        ///
+        /// 为什么是常驻而不是「只在导航模式里」：
+        ///   游戏的推进剧情是自己在 Update 里读 Input.GetKeyDown(空格/回车) 的。
+        ///   而 StandaloneInputModule 也会在回车/空格时向「当前选中对象」发一次
+        ///   submit。只要之前有任何控件被选中过——鼠标点过、游戏自己的
+        ///   AutoFocusInputField.Select()、或者我们退出导航后残留的选中态——
+        ///   按空格推进剧情就会顺手把那个控件再点一次。
+        ///
+        ///   本模组的语义是：回车/空格只在导航模式里、且有选中项时才算提交，
+        ///   其余一律归还给游戏。所以这条通路必须一直关着。
+        ///
+        /// 代价与安全性：
+        ///   - 失去 uGUI 原生的方向键导航 —— 那正是本导航模式要替代的东西。
+        ///   - 鼠标点按走 pointer 事件，不受影响。
+        ///   - 输入框打字走 TMP_InputField 自己读 Input，不受影响；
+        ///     游戏确认输入框也是自己读 Input.GetKeyDown(Return)。
+        ///   - 游戏全代码没有一处 SetSelectedGameObject，本就不依赖选中态。
+        ///   - 新场景的 EventSystem 默认是 true，所以每帧都要重申一次。
+        ///
+        /// 由 Plugin.Update 无条件调用（不受「菜单键盘导航」开关影响）：
+        /// 这条通路一旦松开，鼠标点过的按钮就会在按空格推进剧情时被重复点击。
         /// </summary>
-        private static void SuppressUnitySubmit(bool suppress)
+        internal static void KeepUnitySubmitOff()
         {
             try
             {
                 EventSystem es = EventSystem.current;
                 if (es == null) return;
-                if (suppress)
-                {
-                    if (!_sendNavSaved) { _savedSendNav = es.sendNavigationEvents; _sendNavSaved = true; }
-                    es.sendNavigationEvents = false;
-                }
-                else if (_sendNavSaved)
-                {
-                    es.sendNavigationEvents = _savedSendNav;
-                    _sendNavSaved = false;
-                }
+                if (es.sendNavigationEvents) es.sendNavigationEvents = false;
             }
-            catch { _sendNavSaved = false; }
+            catch { }
+        }
+
+        /// <summary>清掉我们自己设的选中态，去掉高亮、也不给 uGUI 留提交目标。</summary>
+        private static void ReleaseSelection()
+        {
+            GameObject go = _selectedByUs;
+            _selectedByUs = null;
+            if (go == null) return;   // 已被销毁的也算 null，直接跳过
+            try
+            {
+                EventSystem es = EventSystem.current;
+                if (es != null && es.currentSelectedGameObject == go)
+                    es.SetSelectedGameObject(null);
+            }
+            catch { }
+        }
+
+        /// <summary>把某个对象设成当前选中（用于让游戏自己的高亮态生效）。</summary>
+        private static void SelectByUs(GameObject go)
+        {
+            if (go == null) return;
+            try
+            {
+                EventSystem es = EventSystem.current;
+                if (es == null) return;
+                es.SetSelectedGameObject(go);
+                _selectedByUs = go;
+            }
+            catch { }
         }
 
         private static bool SceneStable()
@@ -378,12 +444,7 @@ namespace TransparentHerA11y
             Selectable s = Items[_index];
             if (s == null) { ExitInternal(false); return; }
 
-            try
-            {
-                EventSystem es = EventSystem.current;
-                if (es != null && s.gameObject != null) es.SetSelectedGameObject(s.gameObject);
-            }
-            catch { }
+            SelectByUs(s.gameObject);
 
             Speech.Speak(prefix + Describe(s) + "。" + (_index + 1) + " / " + Items.Count, true);
         }
@@ -402,10 +463,55 @@ namespace TransparentHerA11y
 
         // ================= 操作 =================
 
-        private static void Activate()
+        /// <summary>当前选中项；导航模式未生效或该项已失效时返回 null。</summary>
+        private static Selectable CurrentItem()
         {
-            if (!_active || Items.Count == 0) return;
-            Selectable s = Items[_index];
+            if (!_active) return null;
+            if (_groupIndex < 0 || _groupIndex >= Groups.Count) return null;
+            if (Items.Count == 0) return null;
+            int i = Mathf.Clamp(_index, 0, Items.Count - 1);
+            Selectable s = Items[i];
+            return s == null ? null : s;   // Unity 伪空：已销毁对象在此拦下
+        }
+
+        /// <summary>
+        /// 本帧游戏自身那次「推进剧情」是否该被拦掉。
+        ///
+        /// DialogueSceneManager / Ending2DialogueManager 的 Update 都是在
+        /// Input.GetKeyDown(空格/回车) 成立后紧接着调 DialogueButtonClicked()。
+        /// 只要那次按键已经归我们（或即将归我们），这次调用就该拦掉，
+        /// 剧情才只动一次。
+        ///
+        /// 两种判据都要有，因为两个 Update 谁先执行是不确定的：
+        ///   - 我们已经跑过：本帧接管过提交键 → 拦。
+        ///   - 我们还没跑：键正处于按下状态、且我们有可激活的选中项 → 拦。
+        ///
+        /// 我们自己激活控件时引发的推进要放行 —— 那个按钮本来就是干这个的
+        /// （例如全屏热区按钮）。
+        /// </summary>
+        internal static bool BlockGameAdvance
+        {
+            get
+            {
+                if (_inOurActivation) return false;
+
+                try { if (_submitHandledFrame == Time.frameCount) return true; }
+                catch { return false; }
+
+                try
+                {
+                    if (!Input.GetKeyDown(KeyCode.Return)
+                        && !Input.GetKeyDown(KeyCode.KeypadEnter)
+                        && !Input.GetKeyDown(KeyCode.Space)) return false;
+                }
+                catch { return false; }
+
+                return CurrentItem() != null;
+            }
+        }
+
+        private static void Activate(Selectable s)
+        {
             if (s == null) { ExitInternal(false); return; }
 
             if (!s.interactable)
@@ -419,11 +525,11 @@ namespace TransparentHerA11y
                 TMP_InputField inf = s as TMP_InputField;
                 if (inf != null)
                 {
-                    SuppressUnitySubmit(false);
-                    EventSystem es = EventSystem.current;
-                    if (es != null) es.SetSelectedGameObject(inf.gameObject);
-                    inf.ActivateInputField();
+                    // 先退出导航（ReleaseSelection 会清掉上一个高亮），
+                    // 再把焦点交给输入框，否则刚设的焦点会被自己清掉。
                     ExitInternal(false);
+                    SelectByUs(inf.gameObject);
+                    inf.ActivateInputField();
                     Speech.Speak("已进入输入框，直接打字即可。按 Tab 返回导航。", true);
                     return;
                 }
@@ -449,15 +555,22 @@ namespace TransparentHerA11y
                 {
                     string label = TextOf(s);
                     Speech.Speak("已激活 " + label, false);
-                    b.onClick.Invoke();
+                    _inOurActivation = true;
+                    try { b.onClick.Invoke(); }
+                    finally { _inOurActivation = false; }
                     // 下一帧重扫：此刻旧场景仍完整存活；
                     // 若该按钮触发场景切换，离真正卸载还有几十帧
                     RequestRescanNextFrame();
                     return;
                 }
 
-                ExecuteEvents.Execute(s.gameObject, new BaseEventData(EventSystem.current),
-                    ExecuteEvents.submitHandler);
+                _inOurActivation = true;
+                try
+                {
+                    ExecuteEvents.Execute(s.gameObject, new BaseEventData(EventSystem.current),
+                        ExecuteEvents.submitHandler);
+                }
+                finally { _inOurActivation = false; }
                 RequestRescanNextFrame();
             }
             catch (Exception e)
@@ -518,8 +631,28 @@ namespace TransparentHerA11y
             }
 
             if (Input.GetKeyDown(KeyCode.Tab)) { Toggle(); return; }
+
+            // 全部控件失效时先退出导航，把按键还给游戏
+            if (_active && (Groups.Count == 0 || Items.Count == 0)) ExitInternal(false);
+
+            // ---- 回车 / 空格：整块状态机唯一的判定点 ----
+            //
+            //   非导航模式            CurrentItem() 为 null → 什么都不做，游戏自己推进剧情
+            //   导航模式 + 没有可用项  CurrentItem() 为 null → 同上
+            //   导航模式 + 有可用项    → 我们接管，激活它，并拦住游戏同一帧的推进
+            if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter)
+                || Input.GetKeyDown(KeyCode.Space))
+            {
+                Selectable target = CurrentItem();
+                if (target != null)
+                {
+                    _submitHandledFrame = Time.frameCount;
+                    Activate(target);
+                }
+                return;
+            }
+
             if (!_active) return;
-            if (Groups.Count == 0 || Items.Count == 0) { ExitInternal(false); return; }
 
             if (Input.GetKeyDown(KeyCode.UpArrow))
             {
@@ -535,9 +668,6 @@ namespace TransparentHerA11y
             else if (Input.GetKeyDown(KeyCode.PageUp)) SwitchGroup(-1);
             else if (Input.GetKeyDown(KeyCode.LeftArrow)) Adjust(-1f);
             else if (Input.GetKeyDown(KeyCode.RightArrow)) Adjust(1f);
-            else if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter)
-                     || Input.GetKeyDown(KeyCode.Space))
-                Activate();
             else if (Input.GetKeyDown(KeyCode.Home)) { _index = 0; Announce(null); }
             else if (Input.GetKeyDown(KeyCode.End)) { _index = Items.Count - 1; Announce(null); }
         }

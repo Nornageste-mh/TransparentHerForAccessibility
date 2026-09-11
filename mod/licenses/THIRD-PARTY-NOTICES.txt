@@ -1,0 +1,119 @@
+﻿TransparentHerA11y 第三方组件与许可证
+=====================================
+（随安装包分发 · 2026-09-11）
+
+
+本安装包除本模组自身（TransparentHerA11y.dll）外，还随附以下第三方二进制组件。
+它们全部以**未经修改**的原样形式再分发，各自作为独立文件存在，
+本模组没有静态链接它们中的任何一个，也没有改动其代码。
+
+本模组自身不含上述组件的任何部分，也不含任何游戏资源。
+
+
+------------------------------------------------------------
+一、组件清单
+------------------------------------------------------------
+
+1) BepInEx 5.4.23.5 (win x64)
+   随包文件：BepInEx\core\BepInEx.dll、BepInEx.Preloader.dll
+   许可证  ：MIT — Copyright (c) 2018 Bepis
+   上游    ：https://github.com/BepInEx/BepInEx
+   全文    ：MIT-BepInEx.txt
+
+2) BepInEx.Harmony（BepInEx 5.4.23.5 内置子模块，提交 d4cdcb4c）
+   随包文件：BepInEx\core\BepInEx.Harmony.dll、HarmonyXInterop.dll、0Harmony20.dll
+   许可证  ：MIT
+             注：上游 LICENSE 的版权行为 "Copyright (c) 2019"，持有人一项本身就是空的，
+             此处照原样保留，未替上游补写。
+   上游    ：https://github.com/BepInEx/BepInEx.Harmony
+   全文    ：MIT-BepInEx.Harmony.txt
+
+3) HarmonyX 2.9.0
+   随包文件：BepInEx\core\0Harmony.dll
+   许可证  ：MIT，带**两个**版权行
+             Copyright (c) 2020 BepInEx
+             Copyright (c) 2017 Andreas Pardeike（Harmony 2 原作者，HarmonyX 是其分支）
+   上游    ：https://github.com/BepInEx/HarmonyX
+   全文    ：MIT-HarmonyX.txt、MIT-Harmony.txt（两个文件都要保留）
+
+4) Mono.Cecil 0.10.4
+   随包文件：Mono.Cecil.dll、Mono.Cecil.Mdb.dll、Mono.Cecil.Pdb.dll、Mono.Cecil.Rocks.dll
+   许可证  ：MIT，带**两个**版权行
+             Copyright (c) 2008 - 2015 Jb Evain
+             Copyright (c) 2008 - 2011 Novell, Inc.
+   上游    ：https://github.com/jbevain/cecil
+   全文    ：MIT-Mono.Cecil.txt
+
+5) MonoMod 22.01.29.01
+   随包文件：MonoMod.RuntimeDetour.dll、MonoMod.Utils.dll
+   许可证  ：MIT — Copyright (c) 2015 - 2020 0x0ade
+   上游    ：https://github.com/MonoMod/MonoMod
+   全文    ：MIT-MonoMod.txt
+
+6) UnityDoorstop 4.5.0
+   随包文件：winhttp.dll、.doorstop_version
+   许可证  ：GNU LGPL 2.1（仅 2.1 版）
+   上游    ：https://github.com/NeighTools/UnityDoorstop
+   全文    ：LGPL-2.1-UnityDoorstop.txt
+   注      ：Doorstop 3 曾以 CC0 发布，自 Doorstop 4 起改为 LGPLv2.1，
+             请勿沿用 CC0 的判断。
+
+7) NVDA Controller Client（Controller Client API 2.0）
+   随包文件：nvdaControllerClient.dll
+             （包根一份 + BepInEx\plugins\ 一份，两份内容完全相同，
+               包根那份是给 Mono 的 DllImport 查找用的，不是两个不同组件）
+   许可证  ：GNU LGPL 2.1（仅 2.1 版）
+   上游    ：NV Access — https://github.com/nvaccess/nvda
+             （目录 extras/controllerClient 与 nvdaHelper/client）
+   全文    ：LGPL-2.1.txt
+
+
+------------------------------------------------------------
+二、LGPL 组件的源码获取（LGPL-2.1 第 6 条）
+------------------------------------------------------------
+
+第 6、7 两项以 LGPL-2.1 授权。二者都以**未经修改的独立动态库**形式随包分发，
+本模组既没有修改它们，也没有把它们静态链接进自己的程序集
+（即 LGPL-2.1 第 6(b) 条所说的「使用共享库机制」的情形）。
+
+尽管如此，LGPL-2.1 第 6 条仍要求随包提供完整许可证文本、
+作出显著声明，并提供源码获取途径。因此：
+
+  · 完整许可证文本见本目录下的 LGPL-2.1-UnityDoorstop.txt 与 LGPL-2.1.txt
+  · 对应源码：
+
+    UnityDoorstop 4.5.0
+      https://github.com/NeighTools/UnityDoorstop/tree/v4.5.0
+
+    NVDA Controller Client
+      https://github.com/nvaccess/nvda
+      （extras/controllerClient、nvdaHelper/client）
+
+  · 若上述地址不可访问，或你需要我们直接提供对应源码副本，
+    请到本项目仓库提 Issue 索取：
+      https://github.com/Nornageste-mh/TransparentHerForAccessibility/issues
+    我们会按 LGPL-2.1 第 6 条，以书面方式提供源码或指明获取方式。
+
+你完全可以把这两个 DLL 换成自行编译的版本，本模组不做任何校验。
+
+
+------------------------------------------------------------
+三、MIT 组件的声明
+------------------------------------------------------------
+
+第 1–5 项以 MIT 授权。按 MIT 的要求，
+其版权声明与许可声明必须随所有副本或实质性部分一同保留，
+因此对应的 MIT-*.txt 文件已随本安装包一并分发，请不要删除它们。
+
+（附注：MonoMod 含一个 MonoMod.Common 子模块，亦为 MIT 授权。）
+
+
+------------------------------------------------------------
+四、其他
+------------------------------------------------------------
+
+· 各组件的许可证文本均为 2026-09-11 从上述上游仓库按指定版本标签原样下载，未作改动。
+· 本安装包不含任何安装程序，不修改任何游戏文件。
+  删除 winhttp.dll 即可完全失效；连同 BepInEx\ 一并删除即彻底移除。
+· 本模组非官方，与游戏开发商 可味玩 KawayiPlay 无关，且不含任何游戏资源。
+  请通过 Steam 购买正版《透明的她与真实的我》后再使用。

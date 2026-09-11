@@ -296,6 +296,10 @@
 · 朗读通道：Tolk / NVDA Controller Client / SAPI，按可用性挑选。
   NVDA Controller Client 为官方 x64 构建，许可证 LGPL-2.1，
   允许随程序分发
+· 第三方组件：本包除本模组外还带了 BepInEx、UnityDoorstop（winhttp.dll）、
+  HarmonyX、Mono.Cecil、MonoMod，它们的许可证与来源说明都在
+  licenses\ 目录里（BepInEx 等为 MIT，UnityDoorstop 与 NVDA Client
+  为 LGPL-2.1）。**请不要删除 licenses\ 目录**，那是再分发的合规要求。
 · 工作方式：Harmony 运行时补丁（23 处），**不修改任何游戏文件**
 · 不写注册表，不动系统目录，所有文件都在 <游戏目录> 内
 · 判定是否有配音：用传入的最终文本反查 DialogueScene，

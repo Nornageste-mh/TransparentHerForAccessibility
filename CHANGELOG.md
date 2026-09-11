@@ -37,6 +37,74 @@
 
 ---
 
+## 发布：GitHub Release 整合包（2026-09-11）
+
+v0.5.7 起改用 **GitHub Release 的 zip 附件**分发整合包：新玩家点一下下载、解压、
+把里面的东西整体拷进游戏根目录即可，不必再自己拼 `BepInEx`。
+
+附件名 `TransparentHerA11y-v0.5.7.zip`，内容就是 `mod\package\`（构建产物，不进版本库）。
+
+### 包里新增 `licenses\`
+
+模组代码是自己写的，但包里带了 **7 个第三方二进制**。此前包里一个许可证文件都没有 ——
+BepInEx 官方发布的 zip 里也不带 LICENSE。而 LGPL-2.1 第 6 条要求：随二进制分发时
+必须附上**完整许可证文本 + 显著声明 + 源码获取途径**。于是补上：
+
+| 组件 | 版本 | 许可证 | 必须保留的版权行 |
+|---|---|---|---|
+| BepInEx | 5.4.23.5 | MIT | `Copyright (c) 2018 Bepis` |
+| BepInEx.Harmony | 5.4.23.5 内置子模块 `d4cdcb4c` | MIT | `Copyright (c) 2019`（持有人上游本来就是空的） |
+| HarmonyX | 2.9.0 | MIT | `Copyright (c) 2020 BepInEx` **和** `Copyright (c) 2017 Andreas Pardeike` |
+| Mono.Cecil | 0.10.4 | MIT | `Copyright (c) 2008 - 2015 Jb Evain` **和** `Copyright (c) 2008 - 2011 Novell, Inc.` |
+| MonoMod | 22.01.29.01 | MIT | `Copyright (c) 2015 - 2020 0x0ade` |
+| UnityDoorstop | 4.5.0（`winhttp.dll`） | LGPL-2.1 | 无（FSF 原文，无逐文件声明） |
+| NVDA Controller Client | Controller Client API 2.0 | LGPL-2.1 | 无（官方 `license.txt` 即 FSF 原文） |
+
+许可证文本都是 2026-09-11 按上面的版本标签从上游仓库原样下载的，没有改写。
+`THIRD-PARTY-NOTICES.txt` 里写明了 LGPL 组件的源码位置与索取方式
+（两者都是未修改的独立 DLL，属 LGPL-2.1 第 6(b) 条的共享库情形）。
+
+### 一个先入为主的错判：BepInEx 是 MIT，不是 LGPL
+
+动手前我以为 BepInEx 5 是 LGPL-2.1 —— 这个印象挺常见，因为 **UnityDoorstop 是 LGPL**，
+而两者总是一起出现。按版本标签逐个去上游取 LICENSE 之后才对上：
+
+- BepInEx 本体是 **MIT**（`Copyright (c) 2018 Bepis`）
+- 真正带 LGPL 的只有 **UnityDoorstop**（`winhttp.dll`）和 **NVDA Controller Client**
+- 顺带两个坑：**Doorstop 3 是 CC0，Doorstop 4 起才改为 LGPLv2.1**，不能沿用旧判断；
+  **HarmonyX 需要两个许可证文件** —— `LICENSE` 是 BepInEx 的，`LICENSE.Harmony`
+  是 Harmony 原作者 Andreas Pardeike 的，只放前者是漏的
+
+如果当时按印象写，就会把 MIT 组件错标成 LGPL，同时漏掉真正有源码义务的两个组件。
+
+### 构建可复现：这次才真正验证了
+
+以前说的「可复现」**没有验证过**。当时比对的四个位置（`bin\Release`、`package\`、
+正式版目录、试玩版目录）其实都是**同一次构建的副本**，MD5 当然一样 —— 那证明的是
+「拷贝没出错」，不是「构建可复现」。
+
+这次打包顺手做了真测试：连续两次 `dotnet build -c Release --no-incremental`，
+两次产物 MD5 **完全相同**（`443C5F04…`），确定性编译确实生效。
+
+但同时发现：**重建出来的 DLL 与实机验收的那一份不是同一个文件**。
+
+| | MD5 | 来源 |
+|---|---|---|
+| 实机验收份 | `CA218DDA05900ACF463F3E67EDFC18BC` | 2026-09-11 18:03 构建，已部署到正式版与试玩版，玩家验收的就是它 |
+| 本次重建 | `443C5F04D6065606B9E928153E9D0608` | 同一份源码、同一套引用，连续两次重建一致 |
+
+差异只有 **72 字节**，分布在 5 个区段，全部落在身份字段上（COFF 时间戳、MVID、PDB GUID）。
+两条独立证据说明它俩的行为完全相同：
+
+- 抽出全部可打印字符串对比：**610 : 610，零差异**（版本号、程序集属性、所有字符串常量都在内）
+- `ilspycmd` 反编译两份 DLL：产出的 65245 字节 C# **逐字节相同**
+
+所以这次 zip 里放的是**重建版** —— 理由是任何人都能自己重建并核对哈希；
+它与实机验收的继承关系靠上面那次反编译比对，而不是靠哈希相等。
+`安装说明.txt` 里的「已实机验证」仍然成立。
+
+---
+
 ## v0.5.7
 
 **沉默按键按了没反应。**

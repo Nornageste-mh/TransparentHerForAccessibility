@@ -12,6 +12,10 @@
     安装包不含安装程序：补丁是 BepInEx 运行时挂载的，不修改游戏文件，
     安装就是「把 package\ 里的东西拷进有 TransparentHer.exe 的那一层」。
     手写说明见 package\安装说明.txt。
+
+    安装包里带了第三方二进制（BepInEx、UnityDoorstop、HarmonyX、Mono.Cecil、
+    MonoMod、NVDA Controller Client），它们的许可证与来源说明放在 licenses\，
+    由本脚本从 .\licenses\ 复制进去（LGPL-2.1 要求随二进制分发附上许可证文本）。
 #>
 [CmdletBinding()]
 param(
@@ -110,6 +114,15 @@ Copy-Item $pluginDll -Destination $plugDir -Force
 Copy-Item $nvdaDll.FullName -Destination $plugDir -Force
 # 同时放一份到包根：Mono 的 DllImport 会先查应用目录
 Copy-Item $nvdaDll.FullName -Destination (Join-Path $pkg "nvdaControllerClient.dll") -Force
+
+# 第三方许可证与来源说明（随二进制分发的合规要求）
+$licDir = Join-Path $mod "licenses"
+if (Test-Path -LiteralPath $licDir) {
+    Copy-Item $licDir -Destination $pkg -Recurse -Force
+    Ok "已附上第三方许可证：licenses\（$((Get-ChildItem $licDir -Recurse -File).Count) 个文件）"
+} else {
+    Write-Host "    警告：找不到 licenses\，安装包将缺少第三方许可证" -ForegroundColor Yellow
+}
 
 $n = (Get-ChildItem $pkg -Recurse -File -Force).Count
 Ok "安装包就绪：$pkg（$n 个文件）"

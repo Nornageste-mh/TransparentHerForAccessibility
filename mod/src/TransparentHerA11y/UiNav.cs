@@ -103,6 +103,10 @@ namespace TransparentHerA11y
         private static int _submitHandledFrame = -1;
         private static bool _inOurActivation;
 
+        // 上一次朗读过的控件。重扫后如果这个位置换了别的控件，必须重新播报 ——
+        // 否则玩家以为还停在刚才听的那一项上，按下去却是另一个东西。
+        private static Selectable _announcedItem;
+
         // 场景切换防护
         private static int _lastSceneHandle = int.MinValue;
         private static float _sceneChangedAt = float.NegativeInfinity;
@@ -144,6 +148,7 @@ namespace TransparentHerA11y
             Groups.Clear();
             _index = 0;
             _pendingRescanFrame = -1;
+            _announcedItem = null;
             ReleaseSelection();
             if (announce)
             {
@@ -444,6 +449,7 @@ namespace TransparentHerA11y
             Selectable s = Items[_index];
             if (s == null) { ExitInternal(false); return; }
 
+            _announcedItem = s;
             SelectByUs(s.gameObject);
 
             Speech.Speak(prefix + Describe(s) + "。" + (_index + 1) + " / " + Items.Count, true);
@@ -633,9 +639,17 @@ namespace TransparentHerA11y
                 if (_active)
                 {
                     if (!SceneStable()) { ExitInternal(false); return; }
+                    Selectable before = _announcedItem;
                     Scan();
                     if (Groups.Count == 0 || Items.Count == 0) { ExitInternal(false); return; }
                     _index = Mathf.Clamp(_index, 0, Items.Count - 1);
+
+                    // 列表重建后 _index 还停在原来的序号上，但那个位置上可能已经换了
+                    // 别的控件（弹窗、二级菜单、翻页都会这样）。这时必须重新播报，
+                    // 否则玩家按下去的是他从没听过的东西 —— 主菜单 START/EXIT 那类
+                    // 只差一个单词的按钮，听错一次就出事。
+                    Selectable now = CurrentItem();
+                    if (now != before) Announce("界面已更新。");
                 }
             }
 

@@ -4,6 +4,7 @@ using System.Text;
 using TMPro;
 using UnityEngine;
 using UnityEngine.EventSystems;
+using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 
 namespace TransparentHerA11y
@@ -19,33 +20,58 @@ namespace TransparentHerA11y
     ///   上 / 下      上一项 / 下一项
     ///   左 / 右      调整滑条（其它控件无作用）
     ///   回车 / 空格  激活（按钮点击、开关切换、输入框聚焦）
+    ///   Home / End   第一项 / 最后一项
     ///
-    /// 进入导航模式时会临时把 EventSystem.sendNavigationEvents 置 false，
-    /// 避免 Unity 自带的 InputModule 与我们的焦点管理互相打架；退出时还原。
+    /// === 设计约束（v1.5 重写，全部是崩溃修复）===
+    ///
+    /// 1) 【绝不定时自动重扫】
+    ///    v1.4 曾在激活按钮后安排 0.35 秒后重扫界面。而「开始游戏」「读档」
+    ///    这类按钮会立刻触发 SceneManager.LoadSceneAsync，场景加载通常快于
+    ///    0.35 秒，重扫恰好落在场景销毁/激活的瞬间 —— 对正在销毁的
+    ///    Selectable 调用 Resources.FindObjectsOfTypeAll 并访问其 rect/scene
+    ///    会触发「无任何 C# 异常」的原生崩溃。
+    ///    实测表现：鼠标进入游戏一切正常，纯键盘进入必崩。
+    ///    现在改为激活后直接退出导航模式，需要时由用户按 Tab 重新扫描。
+    ///
+    /// 2) 【不修改 EventSystem.sendNavigationEvents】
+    ///    那是全局状态；场景切换后若不还原，新场景的 UI 提交会一直失效。
+    ///    现在完全不碰它。游戏自身从不调用 SetSelectedGameObject（已核对
+    ///    反编译源码），所以不存在「Unity 自动提交」与「我们直接 Invoke」
+    ///    重复触发的问题。
+    ///
+    /// 3) 【场景切换强制复位】
+    ///    主动记录 activeScene.handle，一旦变化就立刻退出导航模式、清空
+    ///    控件引用，并在随后的一段时间内拒绝扫描。
     /// </summary>
     internal static class UiNav
     {
         private static bool _active;
-        private static bool _savedSendNav;
-        private static bool _sendNavSaved;
-
         private static readonly List<Selectable> Items = new List<Selectable>();
         private static int _index;
-        private static float _rescanAt;
 
-        /// <summary>导航模式是否开启。开启时按键归本模块处理。</summary>
+        // 场景切换防护
+        private static int _lastSceneHandle = int.MinValue;
+        private static float _sceneChangedAt = float.NegativeInfinity;
+        private const float SceneSettleSeconds = 1.5f;
+
         public static bool Active { get { return _active; } }
 
         // ================= 进入 / 退出 =================
 
         public static void Toggle()
         {
-            if (_active) Exit();
+            if (_active) ExitInternal(true);
             else Enter();
         }
 
         private static void Enter()
         {
+            if (!SceneStable())
+            {
+                Speech.Speak("场景正在切换，请稍候再试。", true);
+                return;
+            }
+
             Scan();
             if (Items.Count == 0)
             {
@@ -55,40 +81,31 @@ namespace TransparentHerA11y
 
             _active = true;
             _index = 0;
-
-            try
-            {
-                EventSystem es = EventSystem.current;
-                if (es != null)
-                {
-                    _savedSendNav = es.sendNavigationEvents;
-                    _sendNavSaved = true;
-                    es.sendNavigationEvents = false;   // 焦点由我们自己管
-                }
-            }
-            catch { }
-
             Speech.Speak("导航模式，共 " + Items.Count + " 项。", true);
             Announce();
         }
 
-        private static void Exit()
+        private static void ExitInternal(bool announce)
         {
             _active = false;
-            RestoreSendNav();
-            Speech.Speak("已退出导航模式。", true);
+            Items.Clear();
+            _index = 0;
+            if (announce)
+            {
+                try { Speech.Speak("已退出导航模式。", true); } catch { }
+            }
         }
 
-        private static void RestoreSendNav()
+        /// <summary>场景是否处于「可以安全扫描」的状态。</summary>
+        private static bool SceneStable()
         {
-            if (!_sendNavSaved) return;
             try
             {
-                EventSystem es = EventSystem.current;
-                if (es != null) es.sendNavigationEvents = _savedSendNav;
+                Scene sc = SceneManager.GetActiveScene();
+                if (!sc.isLoaded) return false;
+                return Time.realtimeSinceStartup - _sceneChangedAt >= SceneSettleSeconds;
             }
-            catch { }
-            _sendNavSaved = false;
+            catch { return false; }
         }
 
         // ================= 扫描 =================
@@ -96,22 +113,22 @@ namespace TransparentHerA11y
         private static void Scan()
         {
             Items.Clear();
+            if (!SceneStable()) return;
+
             try
             {
                 Selectable[] all = Resources.FindObjectsOfTypeAll<Selectable>();
                 for (int i = 0; i < all.Length; i++)
                 {
                     Selectable s = all[i];
-                    if (s == null) continue;
+                    if (s == null) continue;                        // Unity 伪空：已销毁对象在此拦下
                     if (!s.isActiveAndEnabled) continue;
-                    // 排除预制体资源（不在场景里的）
-                    if (!s.gameObject.scene.IsValid()) continue;
+                    if (!s.gameObject.scene.IsValid()) continue;    // 排除预制体资源
 
                     RectTransform rt = s.transform as RectTransform;
                     if (rt == null) continue;
                     if (rt.rect.width < 1f || rt.rect.height < 1f) continue;
 
-                    // 不可见的（CanvasGroup alpha 0）跳过
                     CanvasGroup cg = s.GetComponentInParent<CanvasGroup>();
                     if (cg != null && cg.alpha < 0.05f) continue;
 
@@ -122,6 +139,7 @@ namespace TransparentHerA11y
             catch (Exception e)
             {
                 Plugin.Log.LogError("扫描界面控件失败: " + e.Message);
+                Items.Clear();
             }
         }
 
@@ -130,9 +148,10 @@ namespace TransparentHerA11y
         {
             Items.Sort((a, b) =>
             {
+                if (a == null || b == null) return 0;
                 float ya = ((RectTransform)a.transform).position.y;
                 float yb = ((RectTransform)b.transform).position.y;
-                if (Mathf.Abs(ya - yb) > 24f) return yb.CompareTo(ya);  // 行不同，上方的在前
+                if (Mathf.Abs(ya - yb) > 24f) return yb.CompareTo(ya);
                 float xa = ((RectTransform)a.transform).position.x;
                 float xb = ((RectTransform)b.transform).position.x;
                 return xa.CompareTo(xb);
@@ -180,17 +199,10 @@ namespace TransparentHerA11y
 
         private static void Announce()
         {
-            if (Items.Count == 0) return;
+            if (!_active || Items.Count == 0) return;
             _index = Mathf.Clamp(_index, 0, Items.Count - 1);
             Selectable s = Items[_index];
-            if (s == null) return;
-
-            try
-            {
-                EventSystem es = EventSystem.current;
-                if (es != null) es.SetSelectedGameObject(s.gameObject);
-            }
-            catch { }
+            if (s == null) { ExitInternal(false); return; }
 
             Speech.Speak(Describe(s) + "。" + (_index + 1) + " / " + Items.Count, true);
         }
@@ -199,9 +211,9 @@ namespace TransparentHerA11y
 
         private static void Activate()
         {
-            if (Items.Count == 0) return;
+            if (!_active || Items.Count == 0) return;
             Selectable s = Items[_index];
-            if (s == null) return;
+            if (s == null) { ExitInternal(false); return; }
 
             if (!s.interactable)
             {
@@ -211,27 +223,30 @@ namespace TransparentHerA11y
 
             try
             {
-                Toggle t = s as Toggle;
-                Slider sl = s as Slider;
                 TMP_InputField inf = s as TMP_InputField;
+                if (inf != null)
+                {
+                    // 输入框是唯一必须动 EventSystem 的场景：不选中就没法打字
+                    EventSystem es = EventSystem.current;
+                    if (es != null) es.SetSelectedGameObject(inf.gameObject);
+                    inf.ActivateInputField();
+                    ExitInternal(false);
+                    Speech.Speak("已进入输入框，直接打字即可。按 Tab 返回导航。", true);
+                    return;
+                }
 
+                Toggle t = s as Toggle;
                 if (t != null)
                 {
                     t.isOn = !t.isOn;
                     Speech.Speak(t.isOn ? "开" : "关", false);
-                    _rescanAt = Time.realtimeSinceStartup + 0.25f;
+                    // 开关也可能改变界面甚至触发场景切换，一律退出导航模式
+                    ExitInternal(false);
+                    Speech.Speak("按 Tab 重新扫描界面。", false);
                     return;
                 }
-                if (inf != null)
-                {
-                    // 聚焦输入框并退出导航模式，把键盘交还给输入
-                    EventSystem es = EventSystem.current;
-                    if (es != null) es.SetSelectedGameObject(inf.gameObject);
-                    inf.ActivateInputField();
-                    Exit();
-                    Speech.Speak("已进入输入框，直接打字即可。按 Tab 返回导航。", true);
-                    return;
-                }
+
+                Slider sl = s as Slider;
                 if (sl != null)
                 {
                     Speech.Speak("滑条请用左右方向键调整。", true);
@@ -241,16 +256,19 @@ namespace TransparentHerA11y
                 Button b = s as Button;
                 if (b != null)
                 {
+                    // 关键顺序：先退出导航模式并清空引用，再触发点击。
+                    // 「开始游戏」「读档」会立刻 LoadSceneAsync，
+                    // 若此刻仍持有旧场景的控件引用就会出问题。
+                    string label = TextOf(s);
+                    ExitInternal(false);
+                    Speech.Speak("已激活 " + label, false);
                     b.onClick.Invoke();
-                    // 面板可能变化，稍后重新扫描
-                    _rescanAt = Time.realtimeSinceStartup + 0.35f;
                     return;
                 }
 
-                // 其它 Selectable：走 Unity 的提交
+                ExitInternal(false);
                 ExecuteEvents.Execute(s.gameObject, new BaseEventData(EventSystem.current),
                     ExecuteEvents.submitHandler);
-                _rescanAt = Time.realtimeSinceStartup + 0.35f;
             }
             catch (Exception e)
             {
@@ -277,32 +295,30 @@ namespace TransparentHerA11y
 
         public static void Update()
         {
-            // 面板变化后重新扫描
-            if (_active && _rescanAt > 0f && Time.realtimeSinceStartup >= _rescanAt)
+            // ---- 场景切换防护：必须放在最前面 ----
+            try
             {
-                _rescanAt = 0f;
-                string keep = (_index >= 0 && _index < Items.Count && Items[_index] != null)
-                    ? Items[_index].gameObject.name : null;
-                Scan();
-                if (keep != null)
+                Scene sc = SceneManager.GetActiveScene();
+                if (sc.handle != _lastSceneHandle)
                 {
-                    int found = Items.FindIndex(x => x != null && x.gameObject.name == keep);
-                    if (found >= 0) _index = found;
+                    _lastSceneHandle = sc.handle;
+                    _sceneChangedAt = Time.realtimeSinceStartup;
+                    if (_active || Items.Count > 0) ExitInternal(false);
+                    return;
                 }
-                if (Items.Count == 0) { Exit(); return; }
             }
+            catch { }
 
             if (Input.GetKeyDown(KeyCode.Tab)) { Toggle(); return; }
             if (!_active) return;
+            if (Items.Count == 0) { ExitInternal(false); return; }
 
-            if (Items.Count == 0) { Exit(); return; }
-
-            if (Input.GetKeyDown(KeyCode.UpArrow) || Input.GetKeyDown(KeyCode.LeftShift))
+            if (Input.GetKeyDown(KeyCode.UpArrow))
             {
                 _index = (_index - 1 + Items.Count) % Items.Count;
                 Announce();
             }
-            else if (Input.GetKeyDown(KeyCode.DownArrow) || Input.GetKeyDown(KeyCode.RightShift))
+            else if (Input.GetKeyDown(KeyCode.DownArrow))
             {
                 _index = (_index + 1) % Items.Count;
                 Announce();
@@ -312,14 +328,8 @@ namespace TransparentHerA11y
             else if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter)
                      || Input.GetKeyDown(KeyCode.Space))
                 Activate();
-            else if (Input.GetKeyDown(KeyCode.Home))
-            {
-                _index = 0; Announce();
-            }
-            else if (Input.GetKeyDown(KeyCode.End))
-            {
-                _index = Items.Count - 1; Announce();
-            }
+            else if (Input.GetKeyDown(KeyCode.Home)) { _index = 0; Announce(); }
+            else if (Input.GetKeyDown(KeyCode.End)) { _index = Items.Count - 1; Announce(); }
         }
     }
 }

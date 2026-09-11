@@ -13,7 +13,7 @@ using UnityEngine.UI;
 
 namespace TransparentHerA11y
 {
-    [BepInPlugin(Guid, "TransparentHer A11y Reader", "1.4.0")]
+    [BepInPlugin(Guid, "TransparentHer A11y Reader", "1.5.0")]
     public class Plugin : BaseUnityPlugin
     {
         public const string Guid = "transparenther.a11y.reader";
@@ -74,7 +74,6 @@ namespace TransparentHerA11y
             try
             {
                 Speech.Init(Log);
-                Log.LogInfo("语音后端: " + Speech.BackendName);
                 if (Speech.Current == Speech.Backend.None)
                     Log.LogWarning("语音不可用: " + Speech.LastError);
             }
@@ -574,16 +573,21 @@ namespace TransparentHerA11y
 
         /// <summary>
         /// 「实时」限时选择的 8 秒倒计时（AutoDestroyAfterTime 协程）。
-        /// 返回 false 跳过整个协程，于是不会自动替玩家选默认项。
+        ///
+        /// 这里只延长 delay 参数，绝不能返回 false 跳过方法：
+        /// AutoDestroyAfterTime 是迭代器方法，跳过它会让它返回 null，
+        /// 而调用方是 StartCoroutine(AutoDestroyAfterTime(...)) —— 传入
+        /// null 会直接抛异常。原写法（v1.2）就有这个隐患。
+        ///
         /// 这是本项目最影响体验的一处无障碍修复：读屏朗读 4 个选项再判断，
         /// 8 秒往往不够，玩家会在还没听完时就被系统代选。
         /// </summary>
         [HarmonyPatch(typeof(DialogueSceneManager), "AutoDestroyAfterTime")]
         [HarmonyPatch(new Type[] { typeof(float), typeof(DialogueScene) })]
         [HarmonyPrefix]
-        internal static bool SkipRealTimeTimeout()
+        internal static void ExtendRealTimeTimeout(ref float delay)
         {
-            return !Reader.RealTimeTimeoutDisabled();
+            if (Reader.RealTimeTimeoutDisabled()) delay = 86400f;   // 24 小时 ≈ 不自动选
         }
 
         [HarmonyPatch(typeof(DialogueSceneManager), "GenerateReplyButton", new Type[] { typeof(DialogueScene) })]

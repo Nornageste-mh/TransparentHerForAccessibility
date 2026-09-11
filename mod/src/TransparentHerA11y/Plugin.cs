@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Text;
@@ -13,7 +13,7 @@ using UnityEngine.UI;
 
 namespace TransparentHerA11y
 {
-    [BepInPlugin(Guid, "TransparentHer A11y Reader", "1.3.0")]
+    [BepInPlugin(Guid, "TransparentHer A11y Reader", "1.4.0")]
     public class Plugin : BaseUnityPlugin
     {
         public const string Guid = "transparenther.a11y.reader";
@@ -27,6 +27,7 @@ namespace TransparentHerA11y
         internal static ConfigEntry<bool> CfgReadChoices;
         internal static ConfigEntry<bool> CfgChoiceHotkeys;
         internal static ConfigEntry<bool> CfgNoRealTimeTimeout;
+        internal static ConfigEntry<bool> CfgMenuNav;
         internal static ConfigEntry<string> CfgRepeatKey;
 
         private Harmony _harmony;
@@ -60,6 +61,14 @@ namespace TransparentHerA11y
                 "重新朗读当前这一句的按键。填 KeyCode 名称，例如 Backspace、Tab、Q、F1、Home。\n" +
                 "留空则关闭这个功能。\n" +
                 "警告：R 已被游戏用作「打开历史回顾」，P 是「打开主菜单」，A 是自动，F 是快进，不要填这些。");
+            CfgMenuNav = Config.Bind("朗读", "菜单键盘导航", true,
+                "让主菜单 / 存读档 / 设置 / 画廊等界面可以用键盘操作并被朗读。\n" +
+                "游戏原本这些界面几乎只能鼠标点。\n" +
+                "  Tab          进入 / 退出导航模式\n" +
+                "  上 / 下      上一项 / 下一项\n" +
+                "  左 / 右      调整滑条\n" +
+                "  回车 / 空格  激活（按钮点击、开关切换、输入框聚焦）\n" +
+                "  Home / End   跳到第一项 / 最后一项");
 
             // 挑选语音后端：Tolk > NVDA > SAPI
             try
@@ -90,7 +99,12 @@ namespace TransparentHerA11y
 
         private void Update()
         {
-            try { Reader.Update(); }
+            try
+            {
+                // 导航模式优先：开启时按键归它处理，避免与选项数字键互相干扰
+                if (CfgMenuNav != null && CfgMenuNav.Value) UiNav.Update();
+                if (!UiNav.Active) Reader.Update();
+            }
             catch (Exception e) { Log.LogError("Update 异常: " + e.Message); }
         }
 

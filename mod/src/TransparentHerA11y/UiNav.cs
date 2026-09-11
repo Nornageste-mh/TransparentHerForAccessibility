@@ -522,17 +522,26 @@ namespace TransparentHerA11y
 
         // ================= 退出确认 =================
         //
-        // 只针对「按一下就把游戏关掉、而游戏自己不给确认框」的控件。
+        // 只针对「按一下就把游戏关掉、而游戏自己不给确认框」的那一个控件：
+        // 标题画面角落里的 EXIT。
         //
-        // 实测：标题画面有两个同类按钮，美术字分别是 START 和 EXIT，只差一个单词，
-        // 而读屏玩家拿不到「哪一个是整块大面板、哪一个是角落小图标」这种视觉信息。
-        // 按错的代价是整个会话直接没了，所以补一道确认。
+        // 标题画面有两个同类按钮，美术字分别是 START 和 EXIT，只差一个单词，
+        // 而区分它们真正靠的是「哪一个是整块大面板、哪一个是角落小图标」——
+        // 这种视觉信息读屏拿不到。按错一次整个会话直接没了。
         //
-        // 为什么用「标签里有没有 exit / quit」来判定而不是写死对象名：
-        //   - 游戏里所有会退出的中文按钮（剧情中的「返回标题」、手机菜单的「退出游戏」）
-        //     游戏自己都会弹原生确认框，不需要我们插手；
-        //   - TextOf 优先取 TMP 文本，取不到才回退对象名，所以中文按钮不会命中英文关键字。
-        // 也就是说这个匹配实际上只会命中标题画面那个英文 EXIT。
+        // 游戏只在标题画面这一处不给确认框：剧情中的「返回标题」、手机菜单的
+        // 「退出游戏」游戏自己都会弹原生确认框，我们不能重复问。
+        //
+        // 靠**对象名精确匹配**，名字是从游戏资源里实查的，不是猜的：
+        //   标题场景 level1        StartButton / ExitButton / Title / QuitGame
+        //   剧情场景 level3-5      MenuButton / QuitGame / Exit / ...   ← 没有 ExitButton
+        // 完整版与试玩版都是这个结果，所以「名字 == ExitButton」只命中标题那一个。
+        //
+        // 踩过的坑（v0.5.4）：用正则 \b(exit|quit)\b 匹配，结果反了 ——
+        //   ExitButton / QuitGame 是驼峰拼接，单词后面紧跟字母，根本没有 \b 词边界，
+        //   于是标题那个 ExitButton 没命中；反而命中了剧情里名字就叫 Exit 的按钮
+        //   （手机菜单的「退出游戏」，游戏自己有确认框）。
+        //   教训：这种判定别用词边界，也别用「包含」，直接拿实查到的名字比。
 
         private static Selectable _pendingQuit;
         private static float _pendingQuitAt;
@@ -543,9 +552,18 @@ namespace TransparentHerA11y
             if (Plugin.CfgQuitConfirm == null || !Plugin.CfgQuitConfirm.Value) return false;
             try
             {
-                string label = (s.gameObject.name ?? "") + " " + TextOf(s);
-                return System.Text.RegularExpressions.Regex.IsMatch(
-                    label, @"(?i)\b(exit|quit)\b");
+                string cfg = Plugin.CfgQuitNames != null ? Plugin.CfgQuitNames.Value : "ExitButton";
+                if (string.IsNullOrEmpty(cfg)) return false;
+
+                string name = s.gameObject.name ?? "";
+                string[] wants = cfg.Split(new char[] { ',', '，' });
+                for (int i = 0; i < wants.Length; i++)
+                {
+                    string want = wants[i].Trim();
+                    if (want.Length == 0) continue;
+                    if (string.Equals(name, want, StringComparison.OrdinalIgnoreCase)) return true;
+                }
+                return false;
             }
             catch { return false; }
         }
@@ -565,6 +583,13 @@ namespace TransparentHerA11y
         {
             _pendingQuit = s;
             _pendingQuitAt = Time.realtimeSinceStartup;
+            // 留痕：万一配错了名字，日志里能看出到底拦的是哪个控件。
+            try
+            {
+                Plugin.Log.LogInfo("[UiNav] 退出确认：「" + s.gameObject.name + "」标签「"
+                    + TextOf(s) + "」场景 " + SceneManager.GetActiveScene().name);
+            }
+            catch { }
             Speech.Speak("这是退出游戏。再按一次回车或空格确认退出，按别的键取消。", true);
         }
 

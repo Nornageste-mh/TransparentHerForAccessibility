@@ -13,7 +13,7 @@ using UnityEngine.UI;
 
 namespace TransparentHerA11y
 {
-    [BepInPlugin(Guid, "TransparentHer A11y Reader", "0.5.4")]
+    [BepInPlugin(Guid, "TransparentHer A11y Reader", "0.5.5")]
     public class Plugin : BaseUnityPlugin
     {
         public const string Guid = "transparenther.a11y.reader";
@@ -30,6 +30,7 @@ namespace TransparentHerA11y
         internal static ConfigEntry<string> CfgSilenceKey;
         internal static ConfigEntry<bool> CfgMenuNav;
         internal static ConfigEntry<bool> CfgQuitConfirm;
+        internal static ConfigEntry<string> CfgQuitNames;
         internal static ConfigEntry<string> CfgRepeatKey;
 
         private Harmony _harmony;
@@ -91,10 +92,18 @@ namespace TransparentHerA11y
                 "标题画面有两个美术字按钮，文字分别是 START 和 EXIT，只差一个单词，\n" +
                 "而「哪一个是整块大面板、哪一个是角落小图标」这种视觉信息读屏拿不到，\n" +
                 "按错一次的代价是整个游戏直接关掉。\n" +
-                "开启后，在导航模式下激活这类按钮会先朗读一次确认，\n" +
+                "开启后，在导航模式下激活下面列出的控件会先朗读一次确认，\n" +
                 "再按一次回车或空格才真的退出；按方向键即取消。\n" +
-                "只影响标签是英文 exit / quit 的控件。游戏里其它退出（剧情中的「返回标题」、\n" +
-                "手机菜单的「退出游戏」）游戏自己会弹原生确认框，不会重复询问。");
+                "只针对游戏自己不给确认框的那一个按钮。剧情中的「返回标题」、\n" +
+                "手机菜单的「退出游戏」游戏自己会弹原生确认框，不会重复询问。");
+            CfgQuitNames = Config.Bind("朗读", "退出确认对象名", "ExitButton",
+                "哪些控件需要上面那道二次确认，按 Unity 里的对象名精确匹配（区分大小写以外的完全一致）。\n" +
+                "默认 ExitButton —— 这个名字是从游戏资源里实查的：\n" +
+                "  标题场景   StartButton / ExitButton\n" +
+                "  剧情场景   MenuButton / QuitGame / Exit（手机菜单的退出，游戏自己有确认框）\n" +
+                "完整版和试玩版都是这个结果，所以默认值只会命中标题画面那一个 EXIT。\n" +
+                "对不上时日志里会写「[UiNav] 退出确认：「<对象名>」」，照着改这里即可。\n" +
+                "多个名字用逗号分隔；留空则关闭。");
 
             // 挑选语音后端：Tolk > NVDA > SAPI
             try

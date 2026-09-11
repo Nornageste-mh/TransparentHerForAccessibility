@@ -40,7 +40,7 @@ namespace TransparentHerA11y
     ///    现在把不同的文本拼起来（最多 3 段）。
     ///
     /// D) 【绝不定时重扫 + 场景切换必须复位】
-    ///    v1.4 曾在激活按钮后 0.35 秒重扫界面。「开始游戏」「读档」会立刻
+    ///    v0.3.0 曾在激活按钮后 0.35 秒重扫界面。「开始游戏」「读档」会立刻
     ///    SceneManager.LoadSceneAsync，重扫恰好落在场景销毁/激活瞬间，
     ///    对正在销毁的 Selectable 调用 FindObjectsOfTypeAll 会触发
     ///    无 C# 异常的原生崩溃。

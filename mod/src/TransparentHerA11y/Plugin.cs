@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Text;
@@ -13,7 +13,7 @@ using UnityEngine.UI;
 
 namespace TransparentHerA11y
 {
-    [BepInPlugin(Guid, "TransparentHer A11y Reader", "1.7.0")]
+    [BepInPlugin(Guid, "TransparentHer A11y Reader", "0.5.0")]
     public class Plugin : BaseUnityPlugin
     {
         public const string Guid = "transparenther.a11y.reader";
@@ -577,7 +577,7 @@ namespace TransparentHerA11y
         /// 这里只延长 delay 参数，绝不能返回 false 跳过方法：
         /// AutoDestroyAfterTime 是迭代器方法，跳过它会让它返回 null，
         /// 而调用方是 StartCoroutine(AutoDestroyAfterTime(...)) —— 传入
-        /// null 会直接抛异常。原写法（v1.2）就有这个隐患。
+        /// null 会直接抛异常。原写法（v0.2.0）就有这个隐患。
         ///
         /// 这是本项目最影响体验的一处无障碍修复：读屏朗读 4 个选项再判断，
         /// 8 秒往往不够，玩家会在还没听完时就被系统代选。

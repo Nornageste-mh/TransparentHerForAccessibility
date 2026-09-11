@@ -11,6 +11,11 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <NoWarn>CS0169;CS0414;CS0649</NoWarn>
+    <!-- 构建可复现：默认会把 git commit 注入 AssemblyInformationalVersion，
+         导致同样源码在提交前后各编译一次就得到两个不同的 DLL，
+         安装包与已部署副本对不上哈希，没法用哈希核对版本。 -->
+    <Deterministic>true</Deterministic>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <!-- 关掉 SDK 默认的引用裁剪，避免误伤 -->
     <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
   </PropertyGroup>

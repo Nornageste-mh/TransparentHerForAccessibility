@@ -1,0 +1,21 @@
+# 统一换行符与文本属性，避免 Git 反复提示 CRLF/LF 转换
+
+* text=auto
+
+# Windows 脚本与 C# 源码：仓库内 LF，检出为 CRLF
+# 注意：.ps1 必须带 UTF-8 BOM，否则 Windows PowerShell 5.1 会按 GBK 解读中文
+# 导致语法错误。BOM 属于文件内容，不受换行符归一化影响。
+*.ps1     text eol=crlf
+*.cs      text eol=crlf
+*.csproj  text eol=crlf
+*.txt     text eol=crlf
+
+# 文档与脚本
+*.md      text eol=lf
+*.py      text eol=lf
+*.gitignore text eol=lf
+
+# 二进制（正常不应入库，此处兜底）
+*.dll     binary
+*.zip     binary
+*.exe     binary

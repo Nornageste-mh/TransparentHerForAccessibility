@@ -514,6 +514,15 @@ namespace TransparentHerA11y
         {
             if (s == null) { ExitInternal(false); return; }
 
+            // 留痕：崩溃排查用。原生崩溃不会在日志里留下任何异常，
+            // 只有我们自己事前写下的这一行能指明最后碰的是哪个控件。
+            try
+            {
+                Plugin.Log.LogInfo("[UiNav] 激活 " + s.GetType().Name + "「" + TextOf(s) + "」场景 "
+                    + SceneManager.GetActiveScene().name);
+            }
+            catch { }
+
             if (!s.interactable)
             {
                 Speech.Speak("该项当前不可用。", true);

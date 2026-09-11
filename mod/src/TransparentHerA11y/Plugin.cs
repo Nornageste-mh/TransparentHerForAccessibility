@@ -13,7 +13,7 @@ using UnityEngine.UI;
 
 namespace TransparentHerA11y
 {
-    [BepInPlugin(Guid, "TransparentHer A11y Reader", "0.5.1")]
+    [BepInPlugin(Guid, "TransparentHer A11y Reader", "0.5.2")]
     public class Plugin : BaseUnityPlugin
     {
         public const string Guid = "transparenther.a11y.reader";
@@ -26,7 +26,8 @@ namespace TransparentHerA11y
         internal static ConfigEntry<bool> CfgReadPhoneSticker;
         internal static ConfigEntry<bool> CfgReadChoices;
         internal static ConfigEntry<bool> CfgChoiceHotkeys;
-        internal static ConfigEntry<bool> CfgNoRealTimeTimeout;
+        internal static ConfigEntry<float> CfgRealTimeSeconds;
+        internal static ConfigEntry<string> CfgSilenceKey;
         internal static ConfigEntry<bool> CfgMenuNav;
         internal static ConfigEntry<string> CfgRepeatKey;
 
@@ -50,10 +51,23 @@ namespace TransparentHerA11y
                 "出现选项时朗读全部选项内容。");
             CfgChoiceHotkeys = Config.Bind("朗读", "数字键选择选项", true,
                 "用数字键 1-9 选择对应选项（剧情选项与手机选项通用）。");
-            CfgNoRealTimeTimeout = Config.Bind("朗读", "限时选择不自动选", true,
-                "游戏共 246 处「实时」限时选择，原本 8 秒后会由系统自动替你选默认项。\n" +
-                "开启后不再自动选择，改为一直等你按数字键 —— 否则朗读还没念完选项就已经被代选了。\n" +
-                "关掉即恢复游戏原本的 8 秒倒计时。");
+            // 注意：游戏的「实时」限时选择是一个真分支，不是计时器装饰。
+            // 8 秒到点会执行 AutoDestroyAfterTime 的收尾：销毁选项按钮，然后
+            // 用这一批最后一条的 ToNumber 继续剧情 —— 那就是「什么都不做」的
+            // 沉默分支。所以倒计时只能被「拉长」，绝不能被取消，否则玩家就
+            // 永远拿不到沉默这个选项了（v0.5.0 就是这样，v0.5.2 改回）。
+            CfgRealTimeSeconds = Config.Bind("朗读", "限时选择时长", 20f,
+                "游戏共 246 处「实时」限时选择，原本 8 秒到点会自动替你选择——\n" +
+                "也就是这一批里的「沉默」分支（什么都不做）。\n" +
+                "这个值就是倒计时的秒数：读屏念完选项需要更多时间，所以默认放宽到 20 秒。\n" +
+                "填 8 即完全恢复游戏原版节奏。范围 1-600。\n" +
+                "注意：游戏自带的倒计时音效固定 8 秒，不会跟着变长；\n" +
+                "倒计时进度条会跟着这个值走。\n" +
+                "不想等就按「沉默按键」立刻选沉默。");
+            CfgSilenceKey = Config.Bind("朗读", "沉默按键", "0",
+                "在限时选择里立刻选择「沉默」（什么都不做），不必等倒计时走完。\n" +
+                "填 KeyCode 名称，例如 0、Alpha0、Keypad0、Z。留空则关闭。\n" +
+                "选项本身用 1-9，所以 0 不会冲突。");
             // 注意：游戏原生占用了以下按键，不要选它们
             //   A=自动  F=快进  P=打开主菜单  R=打开历史回顾/语音收藏
             //   Ctrl=快进  空格/回车/小键盘回车=推进  Esc=菜单
@@ -383,12 +397,70 @@ namespace TransparentHerA11y
         public static void ClearChoices()
         {
             Choices.Clear();
+            _silenceToNumber = null;
         }
 
-        /// <summary>是否跳过游戏的 8 秒限时选择倒计时。</summary>
-        public static bool RealTimeTimeoutDisabled()
+        /// <summary>
+        /// 倒计时秒数（游戏原版是 8）。
+        ///
+        /// 关键约束：这里只能返回一个**有限**的值。
+        /// 到点后 AutoDestroyAfterTime 会销毁按钮并用本批最后一条的 ToNumber
+        /// 继续剧情 —— 那正是游戏的「沉默」分支。把它变成无穷大（v0.5.0 的
+        /// 86400 秒）等于删掉这个分支，玩家就再也没法「什么都不做」了。
+        /// </summary>
+        public static float RealTimeTimeoutSeconds()
         {
-            return Plugin.CfgNoRealTimeTimeout != null && Plugin.CfgNoRealTimeTimeout.Value;
+            float v = Plugin.CfgRealTimeSeconds != null ? Plugin.CfgRealTimeSeconds.Value : 8f;
+            if (v < 1f) v = 1f;
+            if (v > 600f) v = 600f;
+            return v;
+        }
+
+        /// <summary>
+        /// 「沉默」分支的目标行号。由 AutoDestroyAfterTime 的前缀捕获 ——
+        /// 它就是在 ExecuteRealTimeLogic 里 StartCoroutine 那一刻同步跑到的，
+        /// 因此早于本轮选项的朗读，PressSilence 与倒计时走的是同一条路径。
+        /// </summary>
+        private static string _silenceToNumber;
+
+        public static bool SilenceAvailable()
+        {
+            return !string.IsNullOrEmpty(_silenceToNumber);
+        }
+
+        public static void SetSilenceTarget(DialogueScene defaultScene)
+        {
+            try
+            {
+                _silenceToNumber = defaultScene != null ? defaultScene.ToNumber : null;
+                if (string.IsNullOrEmpty(_silenceToNumber) || _silenceToNumber == "0.0")
+                    _silenceToNumber = null;
+            }
+            catch { _silenceToNumber = null; }
+        }
+
+        /// <summary>立刻走「沉默」分支，等价于原版 8 秒到点后的自动选择。</summary>
+        public static void PressSilence()
+        {
+            string to = _silenceToNumber;
+            if (string.IsNullOrEmpty(to))
+            {
+                Say("现在没有可沉默的限时选择。", false);
+                return;
+            }
+            if (_onReplyClicked == null)
+            {
+                Say("沉默失败：找不到游戏接口。", false);
+                return;
+            }
+            try
+            {
+                DialogueSceneManager m = DialogueSceneManager.Instance;
+                if (m == null) return;
+                Say("沉默。", false);
+                _onReplyClicked.Invoke(m, new object[] { to });
+            }
+            catch (Exception e) { Plugin.Log.LogError("沉默失败: " + e.Message); }
         }
 
         public static void OnPhoneChoices(PhoneDialogueManager mgr)
@@ -443,10 +515,18 @@ namespace TransparentHerA11y
                 }
                 if (Plugin.CfgChoiceHotkeys != null && Plugin.CfgChoiceHotkeys.Value)
                 {
-                    if (_realTimeBatch && Plugin.CfgNoRealTimeTimeout != null && Plugin.CfgNoRealTimeTimeout.Value)
-                        sb.Append("限时选择已暂停，不会自动替你选，请按数字键。");
-                    else
+                    if (_realTimeBatch)
+                    {
+                        int sec = Mathf.RoundToInt(RealTimeTimeoutSeconds());
+                        sb.Append("这是限时选择：").Append(sec).Append(" 秒内不选，就算作沉默。");
+                        if (SilenceAvailable() && SilenceKeyCode() != KeyCode.None)
+                            sb.Append("按 ").Append(SilenceKeyText()).Append(" 可以立刻沉默。");
                         sb.Append("按数字键选择。");
+                    }
+                    else
+                    {
+                        sb.Append("按数字键选择。");
+                    }
                 }
 
                 Say(sb.ToString());
@@ -496,6 +576,50 @@ namespace TransparentHerA11y
             {
                 Speech.Speak(_lastSpoken, true);
             }
+
+            // 沉默键：只在这轮限时选择还没结束时有效
+            KeyCode sk = SilenceKeyCode();
+            if (sk != KeyCode.None && SilenceAvailable() && Input.GetKeyDown(sk))
+            {
+                PressSilence();
+            }
+        }
+
+        private static KeyCode _silenceKey = KeyCode.Alpha0;
+        private static string _silenceKeyText = "0";
+        private static bool _silenceKeyParsed;
+
+        /// <summary>读取配置里的沉默按键；解析失败回退到 0。</summary>
+        private static KeyCode SilenceKeyCode()
+        {
+            if (_silenceKeyParsed) return _silenceKey;
+            _silenceKeyParsed = true;
+
+            string s = Plugin.CfgSilenceKey != null ? Plugin.CfgSilenceKey.Value : "";
+            if (s == null || s.Trim().Length == 0)
+            {
+                _silenceKey = KeyCode.None;
+                return _silenceKey;
+            }
+            s = s.Trim();
+            KeyCode parsed;
+            if (Enum.TryParse(s, true, out parsed))
+            {
+                _silenceKey = parsed;
+            }
+            else
+            {
+                Plugin.Log.LogWarning("沉默按键 \"" + s + "\" 无法识别，回退为 0。");
+                _silenceKey = KeyCode.Alpha0;
+            }
+            _silenceKeyText = s;
+            return _silenceKey;
+        }
+
+        private static string SilenceKeyText()
+        {
+            if (!_silenceKeyParsed) SilenceKeyCode();
+            return _silenceKeyText;
         }
 
         private static KeyCode _repeatKey = KeyCode.Backspace;
@@ -581,22 +705,44 @@ namespace TransparentHerA11y
         }
 
         /// <summary>
-        /// 「实时」限时选择的 8 秒倒计时（AutoDestroyAfterTime 协程）。
+        /// 「实时」限时选择的倒计时（AutoDestroyAfterTime 协程）。
         ///
         /// 这里只延长 delay 参数，绝不能返回 false 跳过方法：
         /// AutoDestroyAfterTime 是迭代器方法，跳过它会让它返回 null，
         /// 而调用方是 StartCoroutine(AutoDestroyAfterTime(...)) —— 传入
         /// null 会直接抛异常。原写法（v0.2.0）就有这个隐患。
         ///
-        /// 这是本项目最影响体验的一处无障碍修复：读屏朗读 4 个选项再判断，
-        /// 8 秒往往不够，玩家会在还没听完时就被系统代选。
+        /// 但延长也必须是**有限**的。8 秒到点后这个方法会销毁选项按钮、
+        /// 并用 defaultScene.ToNumber 继续剧情 —— 那就是游戏的沉默分支。
+        /// v0.5.0 把它设成 86400 秒，等于把沉默这个选项从游戏里删掉了，
+        /// 玩家再也没法「什么都不做」。现在改成可配置的有限秒数（默认 20），
+        /// 同时把 defaultScene 记下来供「沉默按键」立即触发同一条路径。
+        ///
+        /// 这个前缀在 StartCoroutine 那一刻同步执行，也就是 ExecuteRealTimeLogic
+        /// 内部、早于它的 Postfix（朗读选项），所以朗读时沉默目标已经就位。
         /// </summary>
         [HarmonyPatch(typeof(DialogueSceneManager), "AutoDestroyAfterTime")]
         [HarmonyPatch(new Type[] { typeof(float), typeof(DialogueScene) })]
         [HarmonyPrefix]
-        internal static void ExtendRealTimeTimeout(ref float delay)
+        internal static void ExtendRealTimeTimeout(ref float delay, DialogueScene defaultScene)
         {
-            if (Reader.RealTimeTimeoutDisabled()) delay = 86400f;   // 24 小时 ≈ 不自动选
+            Reader.SetSilenceTarget(defaultScene);
+            delay = Reader.RealTimeTimeoutSeconds();
+        }
+
+        /// <summary>
+        /// 倒计时进度条（FadingSlider.FadeSliderOverTime）原本写死 8 秒，
+        /// 和上面被拉长的 delay 对不上：条走完了剧情却还停着，看起来像卡死。
+        /// 这里把它的时长改成同一个值。FadingSlider 全游戏只用在限时选择的
+        /// 计时条上（DialogueSceneManager.rtcTimer / Ending2DialogueManager.rtcTimer）。
+        ///
+        /// 同样只改参数不跳过：它是迭代器方法。
+        /// </summary>
+        [HarmonyPatch(typeof(FadingSlider), "FadeSliderOverTime", new Type[] { typeof(float) })]
+        [HarmonyPrefix]
+        internal static void MatchFadeToTimeout(ref float duration)
+        {
+            duration = Reader.RealTimeTimeoutSeconds();
         }
 
         [HarmonyPatch(typeof(DialogueSceneManager), "GenerateReplyButton", new Type[] { typeof(DialogueScene) })]

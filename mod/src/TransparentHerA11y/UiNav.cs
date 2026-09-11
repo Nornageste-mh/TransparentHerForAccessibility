@@ -12,42 +12,50 @@ namespace TransparentHerA11y
     /// <summary>
     /// 菜单 / 存档 / 设置等界面的键盘导航与朗读。
     ///
-    /// 游戏原生的 UI 几乎只能鼠标操作（大量 IPointerEnterHandler，未设
-    /// firstSelectedGameObject，也没有 Navigation 配置）。本模块在运行时
-    /// 扫描当前激活 Canvas 下的所有 Selectable，自己维护焦点顺序：
-    ///
     ///   Tab          进入 / 退出导航模式
     ///   上 / 下      上一项 / 下一项
-    ///   左 / 右      调整滑条（其它控件无作用）
+    ///   左 / 右      调整滑条
     ///   回车 / 空格  激活（按钮点击、开关切换、输入框聚焦）
     ///   Home / End   第一项 / 最后一项
     ///
-    /// === 设计约束（v1.5 重写，全部是崩溃修复）===
+    /// === 设计约束（每条都对应一次实测故障）===
     ///
-    /// 1) 【绝不定时自动重扫】
-    ///    v1.4 曾在激活按钮后安排 0.35 秒后重扫界面。而「开始游戏」「读档」
-    ///    这类按钮会立刻触发 SceneManager.LoadSceneAsync，场景加载通常快于
-    ///    0.35 秒，重扫恰好落在场景销毁/激活的瞬间 —— 对正在销毁的
-    ///    Selectable 调用 Resources.FindObjectsOfTypeAll 并访问其 rect/scene
-    ///    会触发「无任何 C# 异常」的原生崩溃。
-    ///    实测表现：鼠标进入游戏一切正常，纯键盘进入必崩。
-    ///    现在改为激活后直接退出导航模式，需要时由用户按 Tab 重新扫描。
+    /// A) 【不按屏幕位置简单排序，必须先按渲染层级】
+    ///    游戏的确认弹窗是「覆盖层」：LoadSlotUI.OnSaveSlotClicked 里
+    ///    直接 confirmLoadPanel.SetActive(true)，而它后面的存档槽按钮
+    ///    仍然全部 active。只按屏幕坐标排序的话，弹窗按钮会混在一堆底层
+    ///    按钮中间，读屏用户根本定位不到「是 / 否」。
+    ///    现在排序键为：Canvas.sortingOrder 降序 → 面板兄弟序号降序
+    ///    → 屏幕 Y 降序 → 屏幕 X 升序，
+    ///    即「最上层面板的控件排在最前」，同面板内再按位置排。
     ///
-    /// 2) 【不修改 EventSystem.sendNavigationEvents】
-    ///    那是全局状态；场景切换后若不还原，新场景的 UI 提交会一直失效。
-    ///    现在完全不碰它。游戏自身从不调用 SetSelectedGameObject（已核对
-    ///    反编译源码），所以不存在「Unity 自动提交」与「我们直接 Invoke」
-    ///    重复触发的问题。
+    /// B) 【绝不定时重扫 + 场景切换必须复位】
+    ///    v1.4 曾在激活按钮后 0.35 秒重扫界面。「开始游戏」「读档」会立刻
+    ///    SceneManager.LoadSceneAsync，重扫恰好落在场景销毁/激活瞬间，
+    ///    对正在销毁的 Selectable 调用 FindObjectsOfTypeAll 并访问其
+    ///    rect/scene 会触发无 C# 异常的原生崩溃。
+    ///    现在：激活后只安排「下一帧」重扫（此刻旧场景仍完整存活，
+    ///    距真正卸载还有几十帧），且必须通过场景稳定门禁。
     ///
-    /// 3) 【场景切换强制复位】
-    ///    主动记录 activeScene.handle，一旦变化就立刻退出导航模式、清空
-    ///    控件引用，并在随后的一段时间内拒绝扫描。
+    /// C) 【不修改 EventSystem.sendNavigationEvents】
+    ///    全局状态，跨场景不还原会让新场景 UI 提交失效。已核对反编译源码：
+    ///    游戏自身从不调用 SetSelectedGameObject，所以不会与我们的直接
+    ///    Invoke 重复触发。
+    ///
+    /// D) 【扫描只由显式按键或激活后下一帧触发，且必须过 SceneStable】
+    ///
+    /// E) 【不做尺寸与 CanvasGroup 过滤】
+    ///    曾跳过 rect < 1x1 或父级 CanvasGroup.alpha < 0.05 的控件，
+    ///    但 UIManager.OpenUI 会把面板 alpha 从 0 淡入到 1，刚弹出的面板
+    ///    会被误杀。改由 isActiveAndEnabled 判定即可 —— UIManager 关闭
+    ///    面板时是 SetActive(false)，已经足够。
     /// </summary>
     internal static class UiNav
     {
         private static bool _active;
         private static readonly List<Selectable> Items = new List<Selectable>();
         private static int _index;
+        private static int _pendingRescanFrame = -1;
 
         // 场景切换防护
         private static int _lastSceneHandle = int.MinValue;
@@ -90,13 +98,13 @@ namespace TransparentHerA11y
             _active = false;
             Items.Clear();
             _index = 0;
+            _pendingRescanFrame = -1;
             if (announce)
             {
                 try { Speech.Speak("已退出导航模式。", true); } catch { }
             }
         }
 
-        /// <summary>场景是否处于「可以安全扫描」的状态。</summary>
         private static bool SceneStable()
         {
             try
@@ -121,20 +129,15 @@ namespace TransparentHerA11y
                 for (int i = 0; i < all.Length; i++)
                 {
                     Selectable s = all[i];
-                    if (s == null) continue;                        // Unity 伪空：已销毁对象在此拦下
+                    if (s == null) continue;                       // Unity 伪空：已销毁对象在此拦下
                     if (!s.isActiveAndEnabled) continue;
-                    if (!s.gameObject.scene.IsValid()) continue;    // 排除预制体资源
-
-                    RectTransform rt = s.transform as RectTransform;
-                    if (rt == null) continue;
-                    if (rt.rect.width < 1f || rt.rect.height < 1f) continue;
-
-                    CanvasGroup cg = s.GetComponentInParent<CanvasGroup>();
-                    if (cg != null && cg.alpha < 0.05f) continue;
-
+                    if (!s.gameObject.scene.IsValid()) continue;   // 排除预制体资源
+                    if (!(s.transform is RectTransform)) continue; // 只处理 UI
                     Items.Add(s);
                 }
-                SortByPosition();
+                SortByRenderOrder();
+                if (Plugin.Log != null)
+                    Plugin.Log.LogInfo("[UiNav] 扫描到 " + Items.Count + " 个可操作项。");
             }
             catch (Exception e)
             {
@@ -143,19 +146,61 @@ namespace TransparentHerA11y
             }
         }
 
-        /// <summary>按屏幕位置排序：先上后下，同一行内先左后右。</summary>
-        private static void SortByPosition()
+        /// <summary>
+        /// 渲染层级 → 屏幕位置 排序。
+        /// Unity UI 中后渲染的（兄弟序号更大的）显示在上层，故降序排在最前，
+        /// 这样覆盖层弹窗的按钮会排在一堆底层按钮之前。
+        /// </summary>
+        private static void SortByRenderOrder()
         {
             Items.Sort((a, b) =>
             {
                 if (a == null || b == null) return 0;
-                float ya = ((RectTransform)a.transform).position.y;
-                float yb = ((RectTransform)b.transform).position.y;
+
+                int ca = CanvasOrder(a), cb = CanvasOrder(b);
+                if (ca != cb) return cb.CompareTo(ca);          // Canvas 层级高的在前
+
+                int pa = PanelIndex(a), pb = PanelIndex(b);
+                if (pa != pb) return pb.CompareTo(pa);          // 面板靠后的在前（覆盖层）
+
+                RectTransform ra = a.transform as RectTransform;
+                RectTransform rb = b.transform as RectTransform;
+                if (ra == null || rb == null) return 0;
+
+                float ya = ra.position.y, yb = rb.position.y;
                 if (Mathf.Abs(ya - yb) > 24f) return yb.CompareTo(ya);
-                float xa = ((RectTransform)a.transform).position.x;
-                float xb = ((RectTransform)b.transform).position.x;
-                return xa.CompareTo(xb);
+                return ra.position.x.CompareTo(rb.position.x);
             });
+        }
+
+        private static int CanvasOrder(Selectable s)
+        {
+            try
+            {
+                Canvas c = s.GetComponentInParent<Canvas>();
+                return c != null ? c.sortingOrder : 0;
+            }
+            catch { return 0; }
+        }
+
+        /// <summary>该控件所属面板在 Canvas 下的兄弟序号（越大越靠上层）。</summary>
+        private static int PanelIndex(Selectable s)
+        {
+            try
+            {
+                Canvas c = s.GetComponentInParent<Canvas>();
+                if (c == null) return 0;
+                Transform canvasT = c.transform;
+                Transform prev = s.transform;
+                Transform t = s.transform;
+                while (t != null && t != canvasT)
+                {
+                    prev = t;
+                    t = t.parent;
+                }
+                return (t == null) ? 0 : prev.GetSiblingIndex();
+            }
+            catch { return 0; }
         }
 
         // ================= 描述 =================
@@ -226,7 +271,6 @@ namespace TransparentHerA11y
                 TMP_InputField inf = s as TMP_InputField;
                 if (inf != null)
                 {
-                    // 输入框是唯一必须动 EventSystem 的场景：不选中就没法打字
                     EventSystem es = EventSystem.current;
                     if (es != null) es.SetSelectedGameObject(inf.gameObject);
                     inf.ActivateInputField();
@@ -240,9 +284,7 @@ namespace TransparentHerA11y
                 {
                     t.isOn = !t.isOn;
                     Speech.Speak(t.isOn ? "开" : "关", false);
-                    // 开关也可能改变界面甚至触发场景切换，一律退出导航模式
-                    ExitInternal(false);
-                    Speech.Speak("按 Tab 重新扫描界面。", false);
+                    RequestRescanNextFrame();
                     return;
                 }
 
@@ -256,24 +298,28 @@ namespace TransparentHerA11y
                 Button b = s as Button;
                 if (b != null)
                 {
-                    // 关键顺序：先退出导航模式并清空引用，再触发点击。
-                    // 「开始游戏」「读档」会立刻 LoadSceneAsync，
-                    // 若此刻仍持有旧场景的控件引用就会出问题。
                     string label = TextOf(s);
-                    ExitInternal(false);
                     Speech.Speak("已激活 " + label, false);
                     b.onClick.Invoke();
+                    // 下一帧重扫：此刻旧场景仍完整存活；
+                    // 若该按钮触发场景切换，离真正卸载还有几十帧
+                    RequestRescanNextFrame();
                     return;
                 }
 
-                ExitInternal(false);
                 ExecuteEvents.Execute(s.gameObject, new BaseEventData(EventSystem.current),
                     ExecuteEvents.submitHandler);
+                RequestRescanNextFrame();
             }
             catch (Exception e)
             {
                 Plugin.Log.LogError("激活控件失败: " + e.Message);
             }
+        }
+
+        private static void RequestRescanNextFrame()
+        {
+            _pendingRescanFrame = Time.frameCount + 1;
         }
 
         private static void Adjust(float dir)
@@ -308,6 +354,19 @@ namespace TransparentHerA11y
                 }
             }
             catch { }
+
+            // ---- 激活后的下一帧重扫（唯一允许的自动扫描）----
+            if (_pendingRescanFrame >= 0 && Time.frameCount >= _pendingRescanFrame)
+            {
+                _pendingRescanFrame = -1;
+                if (_active)
+                {
+                    if (!SceneStable()) { ExitInternal(false); return; }
+                    Scan();
+                    if (Items.Count == 0) { ExitInternal(false); return; }
+                    _index = Mathf.Clamp(_index, 0, Items.Count - 1);
+                }
+            }
 
             if (Input.GetKeyDown(KeyCode.Tab)) { Toggle(); return; }
             if (!_active) return;

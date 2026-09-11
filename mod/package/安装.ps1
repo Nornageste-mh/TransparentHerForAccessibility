@@ -43,37 +43,44 @@ if (-not (Test-Path -LiteralPath (Join-Path $GameDir "TransparentHer.exe"))) {
 }
 Say "游戏目录：$GameDir" "Green"
 
-# ---- 2. 冲突检查（绝不覆盖）----
-$targets = @(
-    "winhttp.dll",
-    "doorstop_config.ini",
-    ".doorstop_version",
-    "changelog.txt",
-    "BepInEx"
-)
-$conflicts = @()
-foreach ($t in $targets) {
-    $p = Join-Path $GameDir $t
-    if (Test-Path -LiteralPath $p) {
-        # BepInEx 目录已存在视为「已安装」，允许继续（更新插件）
-        if ($t -eq "BepInEx") { continue }
-        $conflicts += $t
-    }
+# ---- 2. 判定安装模式 ----
+$plugRel  = "BepInEx\plugins\TransparentHerA11y.dll"
+$coreRel  = "BepInEx\core\BepInEx.Preloader.dll"
+$hasWinhttp = Test-Path -LiteralPath (Join-Path $GameDir "winhttp.dll")
+$hasCore    = Test-Path -LiteralPath (Join-Path $GameDir $coreRel)
+
+if ($hasWinhttp -and $hasCore) {
+    $mode = "upgrade"
+    $prev = ""
+    try { $prev = (Get-Item -LiteralPath (Join-Path $GameDir $plugRel)).VersionInfo.FileVersion } catch { }
+    Say "检测到已安装的模组$(if ($prev) { "（当前版本 $prev）" })，执行升级。" "Cyan"
 }
-if ($conflicts.Count -gt 0) {
+elseif ($hasWinhttp -or $hasCore) {
     Say ""
-    Say "检测到以下文件已存在，本程序不会覆盖它们：" "Yellow"
-    foreach ($c in $conflicts) { Say "  · $c" "Yellow" }
+    Say "检测到不完整或外来的 BepInEx 安装：" "Yellow"
+    if ($hasWinhttp) { Say "  · winhttp.dll 存在，但没有 $coreRel" "Yellow" }
+    if ($hasCore)    { Say "  · $coreRel 存在，但没有 winhttp.dll" "Yellow" }
     Say ""
-    Say "可能原因：已安装过 BepInEx / 其他模组，或游戏目录不干净。" "Yellow"
-    Say "请先手动处理这些文件，然后重新运行。" "Yellow"
+    Say "本程序不会覆盖来路不明的文件，以免破坏游戏。" "Yellow"
+    Say "请先手动清理后重试。" "Yellow"
     exit 2
+}
+else {
+    $mode = "fresh"
+    Say "全新安装。" "Cyan"
 }
 
 # ---- 3. 复制文件 ----
+$pkgVer = ""
+try { $pkgVer = (Get-Item -LiteralPath (Join-Path $pkg $plugRel)).VersionInfo.FileVersion } catch { }
 Say ""
-Say "开始复制文件（仅新增，不覆盖）..."
-$copied = 0
+if ($mode -eq "upgrade") {
+    Say "开始更新$(if ($pkgVer) { "到 $pkgVer " })（覆盖本模组自己的文件）..."
+} else {
+    Say "开始复制$(if ($pkgVer) { " $pkgVer" })（仅新增，不覆盖）..."
+}
+
+$copied = 0; $updated = 0; $skipped = 0
 Get-ChildItem -LiteralPath $pkg -Recurse -File -Force | ForEach-Object {
     $rel = $_.FullName.Substring($pkg.Length).TrimStart('\')
     if ($rel -eq "安装.ps1" -or $rel -eq "卸载.ps1" -or $rel -eq "安装说明.txt") { return }
@@ -82,14 +89,31 @@ Get-ChildItem -LiteralPath $pkg -Recurse -File -Force | ForEach-Object {
     if (-not (Test-Path -LiteralPath $destDir)) {
         New-Item -ItemType Directory -Force -Path $destDir | Out-Null
     }
+
     if (Test-Path -LiteralPath $dest) {
-        Say "  跳过（已存在）：$rel" "DarkGray"
+        if ($mode -eq "upgrade") {
+            # 升级模式：只覆盖本模组自己的文件，且内容不同才动
+            $same = $false
+            try {
+                $same = ((Get-FileHash -LiteralPath $_.FullName -Algorithm MD5).Hash -eq
+                         (Get-FileHash -LiteralPath $dest -Algorithm MD5).Hash)
+            } catch { }
+            if ($same) { $script:skipped++ }
+            else {
+                Copy-Item -LiteralPath $_.FullName -Destination $dest -Force
+                Say "  已更新：$rel" "Green"
+                $script:updated++
+            }
+        } else {
+            Say "  跳过（已存在）：$rel" "DarkGray"
+            $script:skipped++
+        }
     } else {
         Copy-Item -LiteralPath $_.FullName -Destination $dest -Force
         $script:copied++
     }
 }
-Say "已新增 $copied 个文件。" "Green"
+Say "新增 $copied 个，更新 $updated 个，跳过 $skipped 个。" "Green"
 
 # ---- 4. 校验 ----
 Say ""
@@ -109,7 +133,7 @@ foreach ($c in $checks) {
 
 Say ""
 if ($allOk) {
-    Say "安装完成！" "Cyan"
+    if ($mode -eq "upgrade") { Say "升级完成！" "Cyan" } else { Say "安装完成！" "Cyan" }
     Say ""
     Say "启动游戏前请确认：" "White"
     Say "  1. NVDA 正在运行"

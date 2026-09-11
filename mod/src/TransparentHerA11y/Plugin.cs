@@ -13,7 +13,7 @@ using UnityEngine.UI;
 
 namespace TransparentHerA11y
 {
-    [BepInPlugin(Guid, "TransparentHer A11y Reader", "0.5.6")]
+    [BepInPlugin(Guid, "TransparentHer A11y Reader", "0.5.7")]
     public class Plugin : BaseUnityPlugin
     {
         public const string Guid = "transparenther.a11y.reader";
@@ -68,8 +68,8 @@ namespace TransparentHerA11y
                 "不想等就按「沉默按键」立刻选沉默。");
             CfgSilenceKey = Config.Bind("朗读", "沉默按键", "0",
                 "在限时选择里立刻选择「沉默」（什么都不做），不必等倒计时走完。\n" +
-                "填 KeyCode 名称，例如 0、Alpha0、Keypad0、Z。留空则关闭。\n" +
-                "选项本身用 1-9，所以 0 不会冲突。");
+                "填一个数字（0-9）时主键盘和小键盘都认；也可以填 KeyCode 名称，例如 Z、F1。\n" +
+                "留空则关闭这个功能。选项本身用 1-9，所以 0 不会冲突。");
             // 注意：游戏原生占用了以下按键，不要选它们
             //   A=自动  F=快进  P=打开主菜单  R=打开历史回顾/语音收藏
             //   Ctrl=快进  空格/回车/小键盘回车=推进  Esc=菜单
@@ -595,42 +595,84 @@ namespace TransparentHerA11y
                 Speech.Speak(_lastSpoken, true);
             }
 
-            // 沉默键：只在这轮限时选择还没结束时有效
-            KeyCode sk = SilenceKeyCode();
-            if (sk != KeyCode.None && SilenceAvailable() && Input.GetKeyDown(sk))
+            // 沉默键：只在这轮限时选择还没结束时有效。
+            // 主键盘和小键盘都认（_silenceKeyAlt 是同一个小键盘键）。
+            if (SilenceAvailable())
             {
-                PressSilence();
+                bool hit = Input.GetKeyDown(_silenceKey);
+                if (!hit && _silenceKeyAlt != KeyCode.None) hit = Input.GetKeyDown(_silenceKeyAlt);
+                if (hit) PressSilence();
             }
         }
 
         private static KeyCode _silenceKey = KeyCode.Alpha0;
+        private static KeyCode _silenceKeyAlt = KeyCode.Keypad0;
         private static string _silenceKeyText = "0";
         private static bool _silenceKeyParsed;
 
-        /// <summary>读取配置里的沉默按键；解析失败回退到 0。</summary>
+        /// <summary>
+        /// 把配置里的按键字符串解析成 KeyCode。解析不出来返回 KeyCode.None。
+        ///
+        /// 这里有个必须绕开的坑：**Enum.TryParse("0") 是成功的**，
+        /// 但它按「数值 0」解析，而 KeyCode 里数值 0 就是 KeyCode.None ——
+        /// 不是 Alpha0。于是默认值 "0" 会被当成「关闭这个功能」，
+        /// 表现就是按了完全没反应（v0.5.6 的沉默按键就是这样废掉的）。
+        /// 所以单个数字先自己映射到 AlphaN，同时给出小键盘上的对应键。
+        /// </summary>
+        private static bool TryParseKey(string s, out KeyCode key, out KeyCode alt)
+        {
+            key = KeyCode.None;
+            alt = KeyCode.None;
+            if (string.IsNullOrEmpty(s)) return false;
+
+            s = s.Trim();
+            if (s.Length == 0) return false;
+
+            if (s.Length == 1 && s[0] >= '0' && s[0] <= '9')
+            {
+                int d = s[0] - '0';
+                key = KeyCode.Alpha0 + d;
+                alt = KeyCode.Keypad0 + d;
+                return true;
+            }
+
+            KeyCode parsed;
+            if (!Enum.TryParse(s, true, out parsed)) return false;
+            if (parsed == KeyCode.None) return false;   // "None" 或别的数值 0 都当没填
+            key = parsed;
+            return true;
+        }
+
+        /// <summary>读取配置里的沉默按键；留空或解析失败回退到 0。</summary>
         private static KeyCode SilenceKeyCode()
         {
             if (_silenceKeyParsed) return _silenceKey;
             _silenceKeyParsed = true;
 
             string s = Plugin.CfgSilenceKey != null ? Plugin.CfgSilenceKey.Value : "";
-            if (s == null || s.Trim().Length == 0)
+            if (s != null && s.Trim().Length == 0)
             {
+                // 明确留空 = 关闭这个功能
                 _silenceKey = KeyCode.None;
+                _silenceKeyAlt = KeyCode.None;
+                _silenceKeyText = "";
                 return _silenceKey;
             }
-            s = s.Trim();
-            KeyCode parsed;
-            if (Enum.TryParse(s, true, out parsed))
+
+            KeyCode k, a;
+            if (TryParseKey(s, out k, out a))
             {
-                _silenceKey = parsed;
+                _silenceKey = k;
+                _silenceKeyAlt = a;
+                _silenceKeyText = s.Trim();
             }
             else
             {
                 Plugin.Log.LogWarning("沉默按键 \"" + s + "\" 无法识别，回退为 0。");
                 _silenceKey = KeyCode.Alpha0;
+                _silenceKeyAlt = KeyCode.Keypad0;
+                _silenceKeyText = "0";
             }
-            _silenceKeyText = s;
             return _silenceKey;
         }
 
@@ -643,7 +685,10 @@ namespace TransparentHerA11y
         private static KeyCode _repeatKey = KeyCode.Backspace;
         private static bool _repeatKeyParsed;
 
-        /// <summary>读取配置里的重读按键；解析失败则回退 Backspace。</summary>
+        /// <summary>
+        /// 读取配置里的重读按键；留空或解析失败则回退 Backspace。
+        /// 同样走 TryParseKey，免得有人填「0」时被当成 KeyCode.None。
+        /// </summary>
         private static KeyCode RepeatKeyCode()
         {
             if (_repeatKeyParsed) return _repeatKey;
@@ -655,10 +700,10 @@ namespace TransparentHerA11y
                 _repeatKey = KeyCode.None;
                 return _repeatKey;
             }
-            KeyCode parsed;
-            if (Enum.TryParse(s.Trim(), true, out parsed))
+            KeyCode k, a;
+            if (TryParseKey(s, out k, out a))
             {
-                _repeatKey = parsed;
+                _repeatKey = k;
             }
             else
             {

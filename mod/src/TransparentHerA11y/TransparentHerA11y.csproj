@@ -16,6 +16,11 @@
          安装包与已部署副本对不上哈希，没法用哈希核对版本。 -->
     <Deterministic>true</Deterministic>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <!-- 光有上面两行还不够：SDK 默认 EnableSourceLink=true，Source Link 会把
+         「当前 git 提交」写进 PDB，而 PDB 的内容哈希又会进 DLL 的 debug 目录
+         和确定性 MVID。结果是同一个 HEAD 内重建可复现、一提交就换个哈希 ——
+         等于没修好。我们不发布 PDB，Source Link 没有任何收益，直接关掉。 -->
+    <EnableSourceLink>false</EnableSourceLink>
     <!-- 关掉 SDK 默认的引用裁剪，避免误伤 -->
     <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
   </PropertyGroup>

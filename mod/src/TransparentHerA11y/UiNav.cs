@@ -384,7 +384,15 @@ namespace TransparentHerA11y
         /// chapterText 是三个字段，5 个空槽的第一个文本都是「无存档」，
         /// 读出来完全一样，用户无法区分。
         /// </summary>
-        private static string TextOf(Selectable s)
+        /// <summary>把一段文本压成可朗读的一行（去换行、去空白）。</summary>
+        private static string Norm(string txt)
+        {
+            if (string.IsNullOrEmpty(txt)) return "";
+            return txt.Replace("\n", " ").Replace("\r", " ").Replace("\t", " ").Trim();
+        }
+
+        /// <summary>控件自己子树里的文本（最多 3 段）。没有则返回空串。</summary>
+        private static string OwnTextOf(Selectable s)
         {
             var parts = new List<string>();
             try
@@ -393,9 +401,7 @@ namespace TransparentHerA11y
                 for (int i = 0; i < all.Length && parts.Count < 3; i++)
                 {
                     if (all[i] == null) continue;
-                    string txt = all[i].text;
-                    if (string.IsNullOrWhiteSpace(txt)) continue;
-                    txt = txt.Replace("\n", " ").Replace("\r", " ").Trim();
+                    string txt = Norm(all[i].text);
                     if (txt.Length == 0) continue;
                     bool dup = false;
                     for (int j = 0; j < parts.Count; j++)
@@ -404,9 +410,211 @@ namespace TransparentHerA11y
                 }
             }
             catch { }
+            return parts.Count == 0 ? "" : string.Join("，", parts.ToArray());
+        }
 
-            if (parts.Count == 0) return s.gameObject.name;
-            return string.Join("，", parts.ToArray());
+        /// <summary>
+        /// 设置面板里那些「美术字标签」的对象名 → 中文。
+        ///
+        /// 游戏的设置面板把行名和页签名**画成了图片**，TMP 里没有对应文字，
+        /// 所以只能退回对象名 —— 而对象名是 ControlButton、General 这种。
+        /// 这里按对象名给出中文。每一条都要有依据，不要凭感觉往里加：
+        ///   - 三个页签：游戏自带本地化表里有 config.tab.general / .volume / .shortcut，
+        ///     对应画面上画的 SYSTEM / SOUND / SHORTCUTS（见设置面板截图）。
+        ///   - 五个单选行的行名：依据设置面板截图逐行对照
+        ///     （窗口分辨率 / 画面模式 / 快进模式 / 指针隐藏 / 画面位于最前）。
+        ///   - 角色音量：本地化表里 config.title.charactervolume = 角色音量。
+        /// </summary>
+        private static readonly Dictionary<string, string> NameAlias =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "General",  "通用" },
+            { "Volume",   "音量" },
+            { "Shortcut", "快捷键" },
+
+            { "ScreenPixelOption", "窗口分辨率" },
+            { "FullScreenOption",  "画面模式" },
+            { "FastForwordOption", "快进模式" },
+            { "HideCursorOption",  "指针隐藏" },
+            { "TopWindowOption",   "画面位于最前" },
+
+            { "CharacterVolumePanel", "角色音量" },
+        };
+
+        /// <summary>
+        /// 没有信息量的样板对象名。上溯找「有意义的名字」时要跳过它们，
+        /// 否则永远停在 Slider / Toggle / ControlButton 上。
+        /// </summary>
+        private static bool IsBoilerplateName(string n)
+        {
+            if (string.IsNullOrEmpty(n)) return true;
+            switch (n.ToLowerInvariant())
+            {
+                case "button": case "controlbutton": case "toggle": case "slider":
+                case "text": case "image": case "textimage": case "rawimage":
+                case "panel": case "option": case "options": case "labels":
+                case "background": case "checkmark": case "line": case "staticpic":
+                case "content": case "item": case "root": case "group":
+                case "fill": case "handle": case "area":
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// 从 parent 的子树里取第一段**不属于 exclude 子树**的文本。
+        ///
+        /// 两个排除条件都很重要：
+        ///   - 排除自己那一支，否则可能读到自己内部的字；
+        ///   - 排除落在**别的控件**（按钮/开关/滑条）里的文本，
+        ///     那是那个控件的标签，不是这一行的标签。
+        /// 另外只接受在层级中处于激活状态的文本，免得读到隐藏面板的字。
+        ///
+        /// 这里同时认 TMP 和旧版 UnityEngine.UI.Text：设置面板的 Text 节点
+        /// 从场景里读不到静态文字（运行期才由本地化表填进去），无法确认是哪一种，
+        /// 两种都认最省事，也不会有副作用。
+        /// </summary>
+        private static string FirstTextOutside(Transform parent, Transform exclude)
+        {
+            try
+            {
+                var cands = new List<Component>();
+                try { cands.AddRange(parent.GetComponentsInChildren<TextMeshProUGUI>(true)); }
+                catch { }
+                try { cands.AddRange(parent.GetComponentsInChildren<Text>(true)); }
+                catch { }
+
+                for (int i = 0; i < cands.Count; i++)
+                {
+                    Component c = cands[i];
+                    if (c == null) continue;
+                    if (!c.gameObject.activeInHierarchy) continue;
+
+                    Transform tt = c.transform;
+                    if (tt == exclude || tt.IsChildOf(exclude)) continue;
+
+                    // 从这段文字往上走，只要在本行范围内遇到别的 Selectable，就说明
+                    // 它属于那个控件，不是行标签。
+                    bool other = false;
+                    Transform cur = tt;
+                    while (cur != null && cur != parent)
+                    {
+                        if (cur.GetComponent<Selectable>() != null) { other = true; break; }
+                        cur = cur.parent;
+                    }
+                    if (other) continue;
+
+                    string txt = TextOn(c);
+                    if (txt.Length > 0) return txt;
+                }
+            }
+            catch { }
+            return "";
+        }
+
+        /// <summary>取组件上的文本，TMP 与旧版 Text 都认。</summary>
+        private static string TextOn(Component c)
+        {
+            TextMeshProUGUI tmp = c as TextMeshProUGUI;
+            if (tmp != null) return Norm(tmp.text);
+            Text legacy = c as Text;
+            if (legacy != null) return Norm(legacy.text);
+            return "";
+        }
+
+        /// <summary>同一个「行」里的标签文本：从自己往上找，最多两层。</summary>
+        private static string RowTextOf(Selectable s)
+        {
+            try
+            {
+                Transform t = s.transform;
+                for (int up = 0; up < 2 && t != null; up++)
+                {
+                    Transform p = t.parent;
+                    if (p == null) break;
+                    string found = FirstTextOutside(p, t);
+                    if (found.Length > 0) return found;
+                    t = p;
+                }
+            }
+            catch { }
+            return "";
+        }
+
+        /// <summary>从自己往上（最多 4 层）找第一个命中中文别名表的祖先名。</summary>
+        private static string AliasAncestorOf(Selectable s)
+        {
+            try
+            {
+                Transform t = s.transform;
+                for (int up = 0; up < 4 && t != null; up++)
+                {
+                    string n = t.gameObject.name;
+                    string alias;
+                    if (n != null && NameAlias.TryGetValue(n, out alias)) return alias;
+                    t = t.parent;
+                }
+            }
+            catch { }
+            return "";
+        }
+
+        /// <summary>
+        /// 控件的可读标签。
+        ///
+        /// === 为什么要分三层找（设置面板实测结构）===
+        ///
+        ///   TextSpeed        [行]
+        ///     Text            ← 中文「文本显示速度」，是控件的**兄弟**，不是子节点
+        ///     Slider          ← 控件，子树里只有 Background / Fill Area / Handle
+        ///   ScreenPixel1080  [单选项]
+        ///     Text            ← 「1280×720」
+        ///     Toggle          ← 控件
+        ///
+        /// 只查控件自己的子树，slider 和 toggle 都会一个字都找不到，
+        /// 于是退回对象名，读出「Slider」「Toggle」——只有类型，没有用途。
+        ///
+        ///   1) 自己子树有文本 → 直接用（存档槽、按钮等绝大多数情况走这条，行为不变）
+        ///   2) 同一行的兄弟文本 → 用，并在前面补上所属行名（窗口分辨率、画面模式…）
+        ///   3) 都没有 → 从自己往上找第一个有意思的名字，跳过样板名
+        /// </summary>
+        private static string TextOf(Selectable s)
+        {
+            string own = OwnTextOf(s);
+            if (own.Length > 0) return own;
+
+            string row = AliasAncestorOf(s);
+            string near = RowTextOf(s);
+            if (near.Length > 0)
+            {
+                if (row.Length > 0 && row != near) return row + "，" + near;
+                return near;
+            }
+
+            if (row.Length > 0) return row;
+
+            // 最后一层：跳过 Slider / Toggle / ControlButton 这类样板名
+            try
+            {
+                Transform t = s.transform;
+                for (int up = 0; up < 4 && t != null; up++)
+                {
+                    string n = t.gameObject.name;
+                    if (!IsBoilerplateName(n)) return n;
+                    t = t.parent;
+                }
+            }
+            catch { }
+
+            return s.gameObject.name;
+        }
+
+        /// <summary>滑条当前值的说法。0-1 范围的条按百分比念，否则念 N / M。</summary>
+        private static string SliderValueText(Slider sl)
+        {
+            if (sl.minValue >= -0.001f && sl.maxValue <= 1.001f)
+                return Mathf.RoundToInt(Mathf.Clamp01(sl.value) * 100f) + "%";
+            return Mathf.RoundToInt(sl.value) + " / " + Mathf.RoundToInt(sl.maxValue);
         }
 
         private static string Describe(Selectable s)
@@ -419,9 +627,7 @@ namespace TransparentHerA11y
             TMP_InputField inf = s as TMP_InputField;
 
             if (t != null) sb.Append("，开关，").Append(t.isOn ? "开" : "关");
-            else if (sl != null)
-                sb.Append("，滑条，").Append(Mathf.RoundToInt(sl.value)).Append(" / ")
-                  .Append(Mathf.RoundToInt(sl.maxValue));
+            else if (sl != null) sb.Append("，滑条，").Append(SliderValueText(sl));
             else if (inf != null)
             {
                 sb.Append("，输入框");
@@ -691,7 +897,7 @@ namespace TransparentHerA11y
                 float step = (sl.maxValue - sl.minValue) / 20f;
                 if (sl.wholeNumbers) step = Mathf.Max(1f, Mathf.Round(step));
                 sl.value = Mathf.Clamp(sl.value + dir * step, sl.minValue, sl.maxValue);
-                Speech.Speak(Mathf.RoundToInt(sl.value) + " / " + Mathf.RoundToInt(sl.maxValue), false);
+                Speech.Speak(SliderValueText(sl), false);
             }
             catch (Exception e) { Plugin.Log.LogError("调整滑条失败: " + e.Message); }
         }

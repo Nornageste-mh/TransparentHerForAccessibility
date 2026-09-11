@@ -4,7 +4,7 @@
     <TargetFramework>netstandard2.1</TargetFramework>
     <AssemblyName>TransparentHerA11y</AssemblyName>
     <RootNamespace>TransparentHerA11y</RootNamespace>
-    <Version>1.1.0</Version>
+    <Version>1.3.0</Version>
     <LangVersion>9.0</LangVersion>
     <Nullable>disable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>

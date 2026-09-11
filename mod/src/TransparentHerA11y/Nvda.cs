@@ -4,7 +4,7 @@ using System.Runtime.InteropServices;
 namespace TransparentHerA11y
 {
     /// <summary>
-    /// NVDA Controller Client 封装。
+    /// NVDA Controller Client 封装（Speech 的 NVDA 后端）。
     /// DLL 名称固定为 nvdaControllerClient.dll（官方 x64 构建的文件名）。
     /// 所有函数返回 0 表示成功，非 0 为 Windows 错误码。
     /// </summary>
@@ -30,44 +30,36 @@ namespace TransparentHerA11y
         /// <summary>DLL 是否成功加载。</summary>
         public static bool DllOk { get { return _dllOk; } }
 
-        /// <summary>把异常暴露给 Plugin 记录，避免静默失败。</summary>
+        /// <summary>把异常暴露出来，避免静默失败。</summary>
         public static string LastError = "";
 
-        /// <summary>探测 NVDA 是否在运行；不在则每 5 秒重试一次（NVDA 可能后启动）。</summary>
-        private static bool Ready()
+        /// <summary>探测 DLL 能否加载（幂等）。</summary>
+        public static void Probe()
         {
-            if (!_dllProbed)
+            if (_dllProbed) return;
+            _dllProbed = true;
+            try
             {
-                _dllProbed = true;
-                try
-                {
-                    nvdaController_testIfRunning();
-                    _dllOk = true;
-                    LastError = "";
-                }
-                catch (Exception e)
-                {
-                    _dllOk = false;
-                    LastError = "DLL 加载失败: " + e.Message;
-                    return false;
-                }
+                nvdaController_testIfRunning();
+                _dllOk = true;
+                LastError = "";
             }
+            catch (Exception e)
+            {
+                _dllOk = false;
+                LastError = "DLL 加载失败: " + e.Message;
+            }
+        }
+
+        /// <summary>NVDA 是否正在运行。供 Speech 挑选后端时调用。</summary>
+        public static bool TestRunning()
+        {
+            Probe();
             if (!_dllOk) return false;
-
-            if (_speakingOk) return true;
-            if (UnityEngine.Time.realtimeSinceStartup < _nextProbe) return false;
-
-            _nextProbe = UnityEngine.Time.realtimeSinceStartup + ProbeInterval;
             try
             {
                 int rc = nvdaController_testIfRunning();
-                if (rc == 0)
-                {
-                    _speakingOk = true;
-                    LastError = "";
-                    Plugin.Log.LogInfo("已连接到 NVDA。");
-                    return true;
-                }
+                if (rc == 0) { _speakingOk = true; LastError = ""; return true; }
                 LastError = "NVDA 未运行 (错误码 " + rc + ")";
                 return false;
             }
@@ -77,6 +69,20 @@ namespace TransparentHerA11y
                 LastError = "调用 NVDA 失败: " + e.Message;
                 return false;
             }
+        }
+
+        /// <summary>内部就绪检查。NVDA 可能后启动，故 5 秒重试一次。</summary>
+        private static bool Ready()
+        {
+            if (_speakingOk) return true;
+            if (UnityEngine.Time.realtimeSinceStartup < _nextProbe) return false;
+            _nextProbe = UnityEngine.Time.realtimeSinceStartup + ProbeInterval;
+            if (TestRunning())
+            {
+                Plugin.Log.LogInfo("已连接到 NVDA。");
+                return true;
+            }
+            return false;
         }
 
         /// <summary>朗读一段文本。interrupt=true 时先打断上一句。</summary>

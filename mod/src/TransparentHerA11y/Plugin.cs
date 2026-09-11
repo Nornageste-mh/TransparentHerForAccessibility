@@ -13,7 +13,7 @@ using UnityEngine.UI;
 
 namespace TransparentHerA11y
 {
-    [BepInPlugin(Guid, "TransparentHer A11y Reader", "1.1.0")]
+    [BepInPlugin(Guid, "TransparentHer A11y Reader", "1.3.0")]
     public class Plugin : BaseUnityPlugin
     {
         public const string Guid = "transparenther.a11y.reader";
@@ -26,6 +26,7 @@ namespace TransparentHerA11y
         internal static ConfigEntry<bool> CfgReadPhoneSticker;
         internal static ConfigEntry<bool> CfgReadChoices;
         internal static ConfigEntry<bool> CfgChoiceHotkeys;
+        internal static ConfigEntry<bool> CfgNoRealTimeTimeout;
         internal static ConfigEntry<string> CfgRepeatKey;
 
         private Harmony _harmony;
@@ -48,6 +49,10 @@ namespace TransparentHerA11y
                 "出现选项时朗读全部选项内容。");
             CfgChoiceHotkeys = Config.Bind("朗读", "数字键选择选项", true,
                 "用数字键 1-9 选择对应选项（剧情选项与手机选项通用）。");
+            CfgNoRealTimeTimeout = Config.Bind("朗读", "限时选择不自动选", true,
+                "游戏共 246 处「实时」限时选择，原本 8 秒后会由系统自动替你选默认项。\n" +
+                "开启后不再自动选择，改为一直等你按数字键 —— 否则朗读还没念完选项就已经被代选了。\n" +
+                "关掉即恢复游戏原本的 8 秒倒计时。");
             // 注意：游戏原生占用了以下按键，不要选它们
             //   A=自动  F=快进  P=打开主菜单  R=打开历史回顾/语音收藏
             //   Ctrl=快进  空格/回车/小键盘回车=推进  Esc=菜单
@@ -56,17 +61,17 @@ namespace TransparentHerA11y
                 "留空则关闭这个功能。\n" +
                 "警告：R 已被游戏用作「打开历史回顾」，P 是「打开主菜单」，A 是自动，F 是快进，不要填这些。");
 
-            // 提前探测 DLL，方便在日志里看出问题
+            // 挑选语音后端：Tolk > NVDA > SAPI
             try
             {
-                Nvda.Speak(" ", false);
-                Log.LogInfo("NVDA 控制器 DLL: " + (Nvda.DllOk ? "已加载" : "未加载"));
-                if (!string.IsNullOrEmpty(Nvda.LastError))
-                    Log.LogWarning("NVDA: " + Nvda.LastError);
+                Speech.Init(Log);
+                Log.LogInfo("语音后端: " + Speech.BackendName);
+                if (Speech.Current == Speech.Backend.None)
+                    Log.LogWarning("语音不可用: " + Speech.LastError);
             }
             catch (Exception e)
             {
-                Log.LogWarning("NVDA 探测异常: " + e.Message);
+                Log.LogWarning("语音初始化异常: " + e.Message);
             }
 
             _harmony = new Harmony(Guid);
@@ -92,6 +97,7 @@ namespace TransparentHerA11y
         private void OnDestroy()
         {
             try { if (_harmony != null) _harmony.UnpatchSelf(); } catch { }
+            try { Speech.Shutdown(); } catch { }
         }
     }
 
@@ -143,7 +149,7 @@ namespace TransparentHerA11y
 
             _lastSpoken = text;
             _lastSpeakTime = Time.realtimeSinceStartup;
-            Nvda.Speak(text, interrupt);
+            Speech.Speak(text, interrupt);
         }
 
         private static string Clean(string s)
@@ -208,7 +214,7 @@ namespace TransparentHerA11y
                 if (voiced)
                 {
                     // 有配音：不朗读，并打断上一句未读完的朗读，避免与语音重叠
-                    Nvda.Stop();
+                    Speech.Stop();
                     _lastSpoken = "";
                     return;
                 }
@@ -302,10 +308,13 @@ namespace TransparentHerA11y
 
         // ---------------- 选项 ----------------
 
-        public static void BeginChoiceBatch()
+        public static void BeginChoiceBatch(bool realTime)
         {
             Choices.Clear();
+            _realTimeBatch = realTime;
         }
+
+        private static bool _realTimeBatch;
 
         public static void AddStoryChoice(DialogueScene scene)
         {
@@ -354,11 +363,18 @@ namespace TransparentHerA11y
             Choices.Clear();
         }
 
+        /// <summary>是否跳过游戏的 8 秒限时选择倒计时。</summary>
+        public static bool RealTimeTimeoutDisabled()
+        {
+            return Plugin.CfgNoRealTimeTimeout != null && Plugin.CfgNoRealTimeTimeout.Value;
+        }
+
         public static void OnPhoneChoices(PhoneDialogueManager mgr)
         {
             try
             {
                 Choices.Clear();
+                _realTimeBatch = false;
                 if (mgr == null || mgr.choiceParentPrefab == null) return;
 
                 Transform parent = mgr.choiceParentPrefab;
@@ -404,7 +420,12 @@ namespace TransparentHerA11y
                     sb.Append("选项 ").Append(i + 1).Append("：").Append(Choices[i].Label).Append("。");
                 }
                 if (Plugin.CfgChoiceHotkeys != null && Plugin.CfgChoiceHotkeys.Value)
-                    sb.Append("按数字键选择。");
+                {
+                    if (_realTimeBatch && Plugin.CfgNoRealTimeTimeout != null && Plugin.CfgNoRealTimeTimeout.Value)
+                        sb.Append("限时选择已暂停，不会自动替你选，请按数字键。");
+                    else
+                        sb.Append("按数字键选择。");
+                }
 
                 Say(sb.ToString());
             }
@@ -451,7 +472,7 @@ namespace TransparentHerA11y
             KeyCode rk = RepeatKeyCode();
             if (rk != KeyCode.None && Input.GetKeyDown(rk) && !string.IsNullOrEmpty(_lastSpoken))
             {
-                Nvda.Speak(_lastSpoken, true);
+                Speech.Speak(_lastSpoken, true);
             }
         }
 
@@ -527,14 +548,28 @@ namespace TransparentHerA11y
         [HarmonyPrefix]
         internal static void BeginRealTime()
         {
-            Reader.BeginChoiceBatch();
+            Reader.BeginChoiceBatch(true);
         }
 
         [HarmonyPatch(typeof(DialogueSceneManager), "ExecuteSelectionLogic", new Type[] { typeof(DialogueScene) })]
         [HarmonyPrefix]
         internal static void BeginSelection()
         {
-            Reader.BeginChoiceBatch();
+            Reader.BeginChoiceBatch(false);
+        }
+
+        /// <summary>
+        /// 「实时」限时选择的 8 秒倒计时（AutoDestroyAfterTime 协程）。
+        /// 返回 false 跳过整个协程，于是不会自动替玩家选默认项。
+        /// 这是本项目最影响体验的一处无障碍修复：读屏朗读 4 个选项再判断，
+        /// 8 秒往往不够，玩家会在还没听完时就被系统代选。
+        /// </summary>
+        [HarmonyPatch(typeof(DialogueSceneManager), "AutoDestroyAfterTime")]
+        [HarmonyPatch(new Type[] { typeof(float), typeof(DialogueScene) })]
+        [HarmonyPrefix]
+        internal static bool SkipRealTimeTimeout()
+        {
+            return !Reader.RealTimeTimeoutDisabled();
         }
 
         [HarmonyPatch(typeof(DialogueSceneManager), "GenerateReplyButton", new Type[] { typeof(DialogueScene) })]

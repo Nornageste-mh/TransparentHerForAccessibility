@@ -149,6 +149,7 @@ namespace TransparentHerA11y
             _index = 0;
             _pendingRescanFrame = -1;
             _announcedItem = null;
+            ClearQuitConfirm();
             ReleaseSelection();
             if (announce)
             {
@@ -452,6 +453,9 @@ namespace TransparentHerA11y
             _announcedItem = s;
             SelectByUs(s.gameObject);
 
+            // 光标移到别处 = 放弃刚才那次退出确认
+            ClearQuitConfirm();
+
             Speech.Speak(prefix + Describe(s) + "。" + (_index + 1) + " / " + Items.Count, true);
         }
 
@@ -514,6 +518,59 @@ namespace TransparentHerA11y
 
                 return CurrentItem() != null;
             }
+        }
+
+        // ================= 退出确认 =================
+        //
+        // 只针对「按一下就把游戏关掉、而游戏自己不给确认框」的控件。
+        //
+        // 实测：标题画面有两个同类按钮，美术字分别是 START 和 EXIT，只差一个单词，
+        // 而读屏玩家拿不到「哪一个是整块大面板、哪一个是角落小图标」这种视觉信息。
+        // 按错的代价是整个会话直接没了，所以补一道确认。
+        //
+        // 为什么用「标签里有没有 exit / quit」来判定而不是写死对象名：
+        //   - 游戏里所有会退出的中文按钮（剧情中的「返回标题」、手机菜单的「退出游戏」）
+        //     游戏自己都会弹原生确认框，不需要我们插手；
+        //   - TextOf 优先取 TMP 文本，取不到才回退对象名，所以中文按钮不会命中英文关键字。
+        // 也就是说这个匹配实际上只会命中标题画面那个英文 EXIT。
+
+        private static Selectable _pendingQuit;
+        private static float _pendingQuitAt;
+        private const float QuitConfirmSeconds = 8f;
+
+        private static bool NeedsQuitConfirm(Selectable s)
+        {
+            if (Plugin.CfgQuitConfirm == null || !Plugin.CfgQuitConfirm.Value) return false;
+            try
+            {
+                string label = (s.gameObject.name ?? "") + " " + TextOf(s);
+                return System.Text.RegularExpressions.Regex.IsMatch(
+                    label, @"(?i)\b(exit|quit)\b");
+            }
+            catch { return false; }
+        }
+
+        private static bool QuitConfirmArmed(Selectable s)
+        {
+            if (_pendingQuit == null) return false;
+            if (Time.realtimeSinceStartup - _pendingQuitAt > QuitConfirmSeconds)
+            {
+                ClearQuitConfirm();
+                return false;
+            }
+            return _pendingQuit == s;
+        }
+
+        private static void ArmQuitConfirm(Selectable s)
+        {
+            _pendingQuit = s;
+            _pendingQuitAt = Time.realtimeSinceStartup;
+            Speech.Speak("这是退出游戏。再按一次回车或空格确认退出，按别的键取消。", true);
+        }
+
+        private static void ClearQuitConfirm()
+        {
+            _pendingQuit = null;
         }
 
         private static void Activate(Selectable s)
@@ -670,6 +727,17 @@ namespace TransparentHerA11y
                 if (target != null)
                 {
                     _submitHandledFrame = Time.frameCount;
+
+                    // 标题画面的 EXIT 一按就关游戏，而游戏自己不给确认框。
+                    // 读屏玩家分不清它和旁边的 START（美术字，只差一个单词），
+                    // 所以这里补一道二次确认。详见 NeedsQuitConfirm。
+                    if (NeedsQuitConfirm(target) && !QuitConfirmArmed(target))
+                    {
+                        ArmQuitConfirm(target);
+                        return;
+                    }
+                    ClearQuitConfirm();
+
                     Activate(target);
                 }
                 return;

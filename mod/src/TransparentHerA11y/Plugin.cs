@@ -13,7 +13,7 @@ using UnityEngine.UI;
 
 namespace TransparentHerA11y
 {
-    [BepInPlugin(Guid, "TransparentHer A11y Reader", "0.5.3")]
+    [BepInPlugin(Guid, "TransparentHer A11y Reader", "0.5.4")]
     public class Plugin : BaseUnityPlugin
     {
         public const string Guid = "transparenther.a11y.reader";
@@ -29,6 +29,7 @@ namespace TransparentHerA11y
         internal static ConfigEntry<float> CfgRealTimeSeconds;
         internal static ConfigEntry<string> CfgSilenceKey;
         internal static ConfigEntry<bool> CfgMenuNav;
+        internal static ConfigEntry<bool> CfgQuitConfirm;
         internal static ConfigEntry<string> CfgRepeatKey;
 
         private Harmony _harmony;
@@ -86,6 +87,14 @@ namespace TransparentHerA11y
                 "回车 / 空格的归属：只有「导航模式下且有选中项」时才是激活控件；\n" +
                 "其余情况（非导航模式、或导航模式下没有可用项）一律归还给游戏，\n" +
                 "也就是照常推进剧情。");
+            CfgQuitConfirm = Config.Bind("朗读", "退出前二次确认", true,
+                "标题画面有两个美术字按钮，文字分别是 START 和 EXIT，只差一个单词，\n" +
+                "而「哪一个是整块大面板、哪一个是角落小图标」这种视觉信息读屏拿不到，\n" +
+                "按错一次的代价是整个游戏直接关掉。\n" +
+                "开启后，在导航模式下激活这类按钮会先朗读一次确认，\n" +
+                "再按一次回车或空格才真的退出；按方向键即取消。\n" +
+                "只影响标签是英文 exit / quit 的控件。游戏里其它退出（剧情中的「返回标题」、\n" +
+                "手机菜单的「退出游戏」）游戏自己会弹原生确认框，不会重复询问。");
 
             // 挑选语音后端：Tolk > NVDA > SAPI
             try

@@ -1,7 +1,7 @@
 # TransparentHerForAccessibility
 
 本仓库是**专门针对 Steam 游戏《透明的她与真实的我》（TransparentHer）** 的屏幕阅读器
-辅助模组（游戏内 BepInEx 插件，通过 Tolk / NVDA Controller Client / SAPI 朗读）。
+辅助模组（游戏内 BepInEx 插件，通过 争渡读屏 ZDSRAPI / Tolk / NVDA Controller Client / SAPI 朗读）。
 
 > ## ⚠️ 郑重警告（请务必阅读）
 >
@@ -94,7 +94,9 @@
   （那是音频资源本身的长度）
 - 未覆盖所有界面与交互，下列内容还没做：历史回顾面板（`R`）朗读、
   CG / Spine 画面口述、视频口述影像、手机贴纸的内容描述、未配音台词的 TTS 预生成
-- 语音朗读依赖所选后端（Tolk / NVDA / SAPI），中文需要中文语音
+- 语音朗读依赖所选后端（争渡读屏 / Tolk / NVDA / SAPI），中文需要中文语音。
+  争渡读屏走它自己的 ZDSRAPI（32 位 `ZDSRAPI.dll` / 64 位 `ZDSRAPI_x64.dll`），
+  该 DLL **不随本仓库与安装包分发**，只在运行时从玩家自己安装的争渡目录里加载
 
 ---
 
@@ -121,7 +123,8 @@ cd mod
 │  ├─ build.ps1                 下依赖 → 编译 → 组包
 │  ├─ src/TransparentHerA11y/
 │  │  ├─ Plugin.cs              补丁与朗读逻辑
-│  │  ├─ Speech.cs              Tolk / NVDA / SAPI 后端调度
+│  │  ├─ Speech.cs              争渡 / Tolk / NVDA / SAPI 后端调度与降级
+│  │  ├─ Zdsr.cs                争渡读屏 ZDSRAPI 封装（运行时动态加载）
 │  │  ├─ Nvda.cs                NVDA Controller Client 封装
 │  │  └─ UiNav.cs               界面键盘导航与朗读
 │  └─ package/                  安装包（直接拷进游戏根目录）
@@ -199,3 +202,7 @@ ilspycmd -p -o decompiled "<游戏目录>\TransparentHer_Data\Managed\Assembly-C
 
 补丁代码与文档：见仓库内说明。第三方组件：
 BepInEx 5.4.23.5（LGPL-2.1）、NVDA Controller Client（LGPL-2.1）。
+
+争渡读屏的接口 DLL（`ZDSRAPI.dll` / `ZDSRAPI_x64.dll`，版权归 ZDSR.COM）
+**不在本仓库、也不在安装包里**：模组只在运行时从玩家自己安装的争渡读屏
+目录中加载它，找不到就自动降级到别的后端。使用争渡读屏本身请遵守其许可协议。

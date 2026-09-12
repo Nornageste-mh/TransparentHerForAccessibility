@@ -13,7 +13,7 @@ using UnityEngine.UI;
 
 namespace TransparentHerA11y
 {
-    [BepInPlugin(Guid, "TransparentHer A11y Reader", "0.5.8")]
+    [BepInPlugin(Guid, "TransparentHer A11y Reader", "0.6.0")]
     public class Plugin : BaseUnityPlugin
     {
         public const string Guid = "transparenther.a11y.reader";
@@ -35,6 +35,8 @@ namespace TransparentHerA11y
         internal static ConfigEntry<bool> CfgQuitConfirm;
         internal static ConfigEntry<string> CfgQuitNames;
         internal static ConfigEntry<string> CfgRepeatKey;
+        internal static ConfigEntry<string> CfgSpeechBackend;
+        internal static ConfigEntry<string> CfgZdsrDll;
 
         private Harmony _harmony;
 
@@ -126,7 +128,21 @@ namespace TransparentHerA11y
                 "用于排查「某个控件定位不到」「只念类型不念文字」。\n" +
                 "排查完请关掉，否则日志会变得很大。");
 
-            // 挑选语音后端：Tolk > NVDA > SAPI
+            CfgSpeechBackend = Config.Bind("朗读", "语音后端", "自动",
+                "用哪个读屏软件朗读。默认「自动」：按 争渡读屏 → Tolk → NVDA → SAPI 的顺序，\n" +
+                "挑第一个「正在运行的读屏」。都不可用时用 Windows 自带的系统语音兜底。\n" +
+                "可填：自动 / 争渡 / Tolk / NVDA / SAPI。\n" +
+                "填具体值时只用那一个（其它一律不试），用于排查「到底是谁在念」。\n" +
+                "注意：争渡读屏和 NVDA 都必须已经启动并正在运行，mod 不会替你启动它们。");
+            CfgZdsrDll = Config.Bind("朗读", "争渡接口 DLL 路径", "",
+                "只有用争渡读屏朗读时才需要。留空即可 —— mod 会自己找：\n" +
+                "  1. 游戏根目录 / BepInEx\\plugins\\ 下的 ZDSRAPI_x64.dll\n" +
+                "  2. 争渡的安装目录（一般是 C:\\Program Files (x86)\\zdsr\\zdsr\\ 或 zdsr_yth\\）\n" +
+                "争渡装在别处、或者上面两处都找不到时，把争渡目录里的 ZDSRAPI_x64.dll\n" +
+                "完整路径填在这里，例如 D:\\zdsr\\zdsr\\ZDSRAPI_x64.dll。\n" +
+                "也可以把 ZDSRAPI_x64.dll（和可选的 ZDSRAPI.ini）直接复制到游戏根目录。");
+
+            // 挑选语音后端：争渡读屏 > Tolk > NVDA > SAPI（可用配置强制指定）
             try
             {
                 Speech.Init(Log);
@@ -161,6 +177,9 @@ namespace TransparentHerA11y
                 // 控件，会在玩家按空格推进剧情时被顺手再点一次。
                 // 详见 UiNav.KeepUnitySubmitOff 的注释。
                 UiNav.KeepUnitySubmitOff();
+
+                // 语音后端可能中途上线（先开游戏、后开读屏），每 10 秒看一眼。
+                Speech.Tick(Log);
 
                 // 导航模式优先：开启时按键归它处理，避免与选项数字键互相干扰
                 if (CfgMenuNav != null && CfgMenuNav.Value) UiNav.Update();

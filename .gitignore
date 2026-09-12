@@ -56,3 +56,7 @@ verify/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# 争渡接口自检脚本（tools\zdsr-probe.ps1）跑完后写在自己旁边的报告：
+# 里面是某台机器的路径与进程清单，属于排障产物，不入库。
+zdsr-probe-report.txt

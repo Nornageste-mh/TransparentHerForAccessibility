@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using BepInEx;
 using BepInEx.Logging;
 
@@ -91,6 +92,10 @@ namespace TransparentHerA11y
         private static float _retryAt;       // 冷却到期时间（realtimeSinceStartup）
         private static bool _missingLogged;  // 「找不到 dll」只详细提醒一次
         private static int _failCount;       // 状态判断失败的次数（控制日志频率）
+        private static int _channel = -1;    // 正在用的通道：0 读屏通道；1 独立通道
+
+        /// <summary>独立通道的名字（type=1 时用）。</summary>
+        private const string ChannelName = "TransparentHerA11y";
 
         /// <summary>
         /// 争渡明明开着、接口却说「没运行」时用来试探的那句话。
@@ -112,8 +117,19 @@ namespace TransparentHerA11y
         // ================= 探测 =================
 
         /// <summary>
-        /// 争渡接口现在能不能用：dll 能加载，且争渡读屏正在运行。
-        /// 每次都重新问一次状态，所以争渡中途启动、中途退出都能被发现。
+        /// 争渡接口现在能不能用。
+        ///
+        /// 判据**不是** InitTTS 的返回码 —— 实测争渡没运行时它照样返回 0。
+        /// 而是 GetSpeakState（3 / 4 才算争渡在运行），再加一次试探朗读兜底。
+        ///
+        /// 通道要试两条：
+        ///   type=0 读屏通道 —— 走争渡自己的语音与设置，最理想；但它要求
+        ///                     争渡读屏本体在运行（接口文档里返回码 2 的意思是
+        ///                     「争渡没有运行**或没有授权**」）。
+        ///   type=1 独立通道 —— 争渡接口自己开的一条通道。实测有玩家机器上
+        ///                     只跑着 ZDSRDaemon.exe（守护进程）而没有
+        ///                     ZDSRMain_x64.exe（读屏本体），读屏通道一直是
+        ///                     「没有运行」；独立通道是这种情况下唯一的机会。
         /// </summary>
         public static bool TryInit(ManualLogSource log)
         {
@@ -122,116 +138,204 @@ namespace TransparentHerA11y
 
             if (_module == IntPtr.Zero && !Load(log)) return false;
 
-            if (!_inited)
+            if (_inited)
             {
-                int rc;
-                try { rc = _initTts(0, IntPtr.Zero, 0); }   // 0 = 走读屏通道（用争渡自己的语音与设置）
-                catch (Exception e)
-                {
-                    _fatal = true;
-                    LastError = "InitTTS 异常: " + e.Message;
-                    return false;
-                }
-
-                if (rc != 0)
-                {
-                    if (rc == 1) _fatal = true;             // 版本不匹配：没救了
-                    LastError = "InitTTS 返回 " + rc + "（" + InitText(rc) + "）";
-                    _retryAt = UnityEngine.Time.realtimeSinceStartup + RetrySeconds;
-                    return false;
-                }
-                _inited = true;
+                // 已经初始化过：只复查状态，争渡中途退出/启动都能发现
+                int st = State();
+                if (st == 3 || st == 4) { LastError = ""; return true; }
+                if (st == 1) { _fatal = true; LastError = "争渡读屏接口版本不匹配（" + LastStateText + "）"; return false; }
+                _inited = false;   // 状态掉了，重新走一遍初始化
             }
 
-            int st;
-            try { st = _getState(); }
-            catch (Exception e)
-            {
-                _fatal = true;
-                LastError = "GetSpeakState 异常: " + e.Message;
-                return false;
-            }
+            string why0, why1;
+            if (TryChannel(0, null, log, out why0)) { _channel = 0; _inited = true; LastError = ""; return true; }
+            if (TryChannel(1, ChannelName, log, out why1)) { _channel = 1; _inited = true; LastError = ""; return true; }
 
-            LastStateText = "GetSpeakState 返回 " + st + "（" + StateText(st) + "）";
-
-            if (st == 3 || st == 4) { LastError = ""; return true; }
-
-            if (st == 1)
-            {
-                _fatal = true;
-                LastError = "争渡读屏接口版本不匹配（" + LastStateText + "）";
-                return false;
-            }
-
-            if (st == 2)
-            {
-                // 接口说「争渡没运行」。但**别急着下结论**：v0.6.0 preview 的实机日志里，
-                // 玩家明明开着争渡，GetSpeakState() 照样返回 2。
-                // 所以这里再补一刀：直接念一句试探文本，看接口收不收（收下返回 0）。
-                // 收下就说明通道是通的 —— 那多半只是接口的「找读屏」那一环没认出来。
-                int rcProbe = Speak(ProbeText, false);
-                if (rcProbe == 0)
-                {
-                    _inited = true;
-                    LastError = "";
-                    log.LogWarning("[Speech] 争渡接口报告「没有运行」（GetSpeakState=2），"
-                        + "但 Speak 一句试探文本返回 0（成功）—— 已按「争渡可用」处理，"
-                        + "这句试探文本如果能听到，就是它念的。"
-                        + "若实际没有声音，把配置「语音后端」改成 SAPI 即可改用系统语音。");
-                    return true;
-                }
-
-                _inited = false;                      // 争渡起来之后重新初始化一次
-                _retryAt = UnityEngine.Time.realtimeSinceStartup + RetrySeconds;
-                LastError = "争渡读屏没有运行（" + LastStateText + "，试探 Speak=" + rcProbe + "）";
-
-                if (_failCount <= 1 || _failCount % 10 == 0)
-                    log.LogWarning("[Speech] " + LastError + "。" + ReaderProcesses());
-                _failCount++;
-
-                return false;
-            }
-
+            _inited = false;
             _retryAt = UnityEngine.Time.realtimeSinceStartup + RetrySeconds;
-            LastError = LastStateText;
+            LastError = "读屏通道：" + why0 + "；独立通道：" + why1;
+
             if (_failCount <= 1 || _failCount % 10 == 0)
-                log.LogWarning("[Speech] 争渡接口状态异常：" + LastStateText + "。" + ReaderProcesses());
+                log.LogWarning("[Speech] " + LastError + "。" + Diagnostics());
             _failCount++;
             return false;
         }
 
         /// <summary>
-        /// 把「当前进程里有没有看起来像读屏的进程」写进日志。
-        /// 这行是给人看的：如果这里明明列出了争渡的进程，而接口仍说「没运行」，
-        /// 就能确定问题出在接口自己的识别环节，而不是玩家没开读屏。
+        /// 初始化一个通道，并判断「现在能不能真的用它说话」。
+        /// why 里带回结论，供日志逐条列出。
         /// </summary>
-        private static string ReaderProcesses()
+        private static bool TryChannel(int type, string name, ManualLogSource log, out string why)
         {
-            var found = new List<string>();
+            why = "";
+            string tag = type == 0 ? "读屏通道" : "独立通道";
+
+            int rc = InitChannel(type, name);
+            if (rc != 0)
+            {
+                if (rc == 1) _fatal = true;
+                why = "InitTTS=" + rc + "（" + InitText(rc) + "）";
+                return false;
+            }
+
+            int st = State();
+            if (st == 3 || st == 4)
+            {
+                if (type == 1)
+                    log.LogWarning("[Speech] 读屏通道用不了，已改用争渡的**独立通道**（InitTTS type=1）—— "
+                        + "这条通道不需要争渡读屏本体在运行，声音可能和读屏自己的语音不完全一样。");
+                return true;
+            }
+
+            if (st == 1)
+            {
+                _fatal = true;
+                why = "接口版本不匹配（" + LastStateText + "）";
+                return false;
+            }
+
+            // 状态说「没有运行或没有授权」。别急着下结论，直接念一句试探文本：
+            // 接口肯收下（返回 0）就说明这条通道是通的，声音也确实出得去。
+            int rcSpeak = Speak(ProbeText, false);
+            if (rcSpeak == 0)
+            {
+                log.LogWarning("[Speech] " + tag + "的状态是「" + StateText(st) + "」，"
+                    + "但试探朗读返回 0（成功）—— 已按可用处理。"
+                    + "如果这句试探文本听不到，把配置「语音后端」改成 SAPI 用系统语音。");
+                return true;
+            }
+
+            why = StateText(st) + "，试探 Speak=" + rcSpeak;
+            return false;
+        }
+
+        private static int InitChannel(int type, string name)
+        {
+            try
+            {
+                IntPtr p = IntPtr.Zero;
+                if (type != 0 && !string.IsNullOrEmpty(name)) p = Marshal.StringToHGlobalUni(name);
+                try { return _initTts(type, p, 0); }
+                finally { if (p != IntPtr.Zero) Marshal.FreeHGlobal(p); }
+            }
+            catch (Exception e)
+            {
+                _fatal = true;
+                LastError = "InitTTS 异常: " + e.Message;
+                return -1;
+            }
+        }
+
+        private static int State()
+        {
+            try
+            {
+                int st = _getState();
+                LastStateText = "GetSpeakState 返回 " + st + "（" + StateText(st) + "）";
+                return st;
+            }
+            catch (Exception e)
+            {
+                _fatal = true;
+                LastError = "GetSpeakState 异常: " + e.Message;
+                return -1;
+            }
+        }
+
+        /// <summary>
+        /// 失败时的那一长串诊断。三段：
+        ///   1. 争渡安装目录里都有哪些进程（按路径判断，不看名字 —— 读屏本体的
+        ///      进程名各版本不一定一样），带窗口标题
+        ///   2. 有没有「读屏本体」进程；只看到守护进程就直接点出来
+        ///   3. 接口目录里的 ZDSRAPI.ini 写了什么（它的设置会覆盖 InitTTS 的参数）
+        /// </summary>
+        private static string Diagnostics()
+        {
+            var sb = new StringBuilder();
+
+            var all = new List<string>();
+            var mains = new List<string>();
+            string installDir = null;
+            try { installDir = Path.GetDirectoryName(DllPath); } catch { }
+
             try
             {
                 foreach (System.Diagnostics.Process p in System.Diagnostics.Process.GetProcesses())
                 {
-                    string n = null;
-                    try { n = p.ProcessName; } catch { }
-                    if (string.IsNullOrEmpty(n)) continue;
-
-                    string l = n.ToLowerInvariant();
-                    if (l.IndexOf("zdsr", StringComparison.Ordinal) < 0
-                        && !l.StartsWith("zd", StringComparison.Ordinal)
-                        && l.IndexOf("nvda", StringComparison.Ordinal) < 0
-                        && l.IndexOf("争渡", StringComparison.Ordinal) < 0) continue;
-
-                    string path = "";
+                    string name = null, path = "", title = "";
+                    int pid = 0;
+                    try { name = p.ProcessName; pid = p.Id; } catch { }
+                    if (string.IsNullOrEmpty(name)) continue;
                     try { path = p.MainModule != null ? p.MainModule.FileName : ""; } catch { }
-                    found.Add(n + "(" + p.Id + (path.Length > 0 ? " " + path : "") + ")");
+                    try { title = p.MainWindowTitle ?? ""; } catch { }
+
+                    bool byName = IsReaderName(name);
+                    bool byPath = installDir != null && path.Length > 0
+                        && path.StartsWith(installDir, StringComparison.OrdinalIgnoreCase);
+
+                    if (!byName && !byPath) continue;
+
+                    all.Add(name + "(" + pid + (title.Length > 0 ? " 「" + title + "」" : "") + ")");
+
+                    // 「读屏本体」：名字里带 main，或者装在争渡目录里、但不是
+                    // 守护进程 / 之多云 / 升级器。只看到守护进程是最常见的情况。
+                    string l = name.ToLowerInvariant();
+                    bool daemonish = l.IndexOf("daemon") >= 0 || l.IndexOf("cloud") >= 0
+                        || l.IndexOf("updat") >= 0 || l.IndexOf("helper") >= 0;
+                    if (!daemonish && (l.IndexOf("main") >= 0 || (byPath && byName))) mains.Add(name);
                 }
             }
             catch { }
 
-            return found.Count > 0
-                ? "当前进程里像读屏的有：" + string.Join("、", found.ToArray())
-                : "当前进程里没看到像读屏的进程（名字里带 zdsr / zd / nvda 的一个都没有）";
+            sb.Append(all.Count > 0
+                ? "争渡目录里的进程：" + string.Join("、", all.ToArray())
+                : "争渡目录里一个进程都没有（争渡没在运行）");
+
+            if (mains.Count == 0 && all.Count > 0)
+            {
+                sb.Append("。**只看到守护进程，没看到读屏本体**（一般是 ZDSRMain_x64.exe）—— "
+                    + "争渡读屏的「读屏通道」要求读屏本体在运行。请从开始菜单/快捷方式启动争渡读屏，"
+                    + "确认它真的在给你读屏，再回到游戏");
+            }
+            else if (mains.Count > 0)
+            {
+                sb.Append("。读屏本体在运行：" + string.Join("、", mains.ToArray())
+                    + " —— 那接口还报「没有运行或没有授权」，就只剩「没有授权」这一种解释了"
+                    + "（争渡的接口文档里，返回码 2 就是这么写的）");
+            }
+
+            sb.Append("。ZDSRAPI.ini：" + IniSummary(installDir));
+            return sb.ToString();
+        }
+
+        private static bool IsReaderName(string name)
+        {
+            string l = name.ToLowerInvariant();
+            return l.IndexOf("zdsr", StringComparison.Ordinal) >= 0
+                || l.StartsWith("zd", StringComparison.Ordinal)
+                || l.IndexOf("nvda", StringComparison.Ordinal) >= 0
+                || l.IndexOf("争渡", StringComparison.Ordinal) >= 0;
+        }
+
+        /// <summary>把接口目录里的 ZDSRAPI.ini 有效内容读出来（它的设置会覆盖 InitTTS 参数）。</summary>
+        private static string IniSummary(string dir)
+        {
+            if (string.IsNullOrEmpty(dir)) return "（不知道接口目录）";
+            string path = Path.Combine(dir, "ZDSRAPI.ini");
+            try
+            {
+                if (!File.Exists(path)) return "（接口目录里没有这个文件，用默认值）";
+
+                var parts = new List<string>();
+                foreach (string raw in File.ReadAllLines(path))
+                {
+                    string line = raw.Trim();
+                    if (line.Length == 0 || line.StartsWith(";") || line.StartsWith("[")) continue;
+                    parts.Add(line);
+                }
+                return parts.Count > 0 ? string.Join("，", parts.ToArray()) : "（只有注释，等于默认值）";
+            }
+            catch (Exception e) { return "（读取失败：" + e.Message + "）"; }
         }
 
         // ================= 朗读 =================
@@ -522,7 +626,7 @@ namespace TransparentHerA11y
             switch (st)
             {
                 case 1: return "接口版本不匹配";
-                case 2: return "争渡读屏没有运行";
+                case 2: return "争渡读屏没有运行或没有授权";
                 case 3: return "正在朗读";
                 case 4: return "空闲";
                 default: return "未知";
@@ -535,7 +639,7 @@ namespace TransparentHerA11y
             {
                 case 0: return "成功";
                 case 1: return "接口版本不匹配";
-                case 2: return "争渡读屏没有运行";
+                case 2: return "争渡读屏没有运行或没有授权";
                 default: return "未知";
             }
         }

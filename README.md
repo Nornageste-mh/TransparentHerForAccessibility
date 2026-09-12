@@ -94,7 +94,7 @@
   （那是音频资源本身的长度）
 - 未覆盖所有界面与交互，下列内容还没做：历史回顾面板（`R`）朗读、
   CG / Spine 画面口述、视频口述影像、手机贴纸的内容描述、未配音台词的 TTS 预生成
-- 语音朗读依赖所选后端（Tolk / NVDA / SAPI），中文需要中文语音
+- 语音朗读依赖所选后端（Tolk / NVDA / SAPI），中文需要中文语音（系统语音里要有中文嗓音）
 
 ---
 
@@ -123,6 +123,7 @@ cd mod
 │  │  ├─ Plugin.cs              补丁与朗读逻辑
 │  │  ├─ Speech.cs              Tolk / NVDA / SAPI 后端调度
 │  │  ├─ Nvda.cs                NVDA Controller Client 封装
+│  │  ├─ Sapi.cs                Windows 内置语音（纯 P/Invoke 直调 ISpVoice）
 │  │  └─ UiNav.cs               界面键盘导航与朗读
 │  └─ package/                  安装包（直接拷进游戏根目录）
 │     └─ 安装说明.txt           ← 用户文档，先看这个

@@ -13,7 +13,7 @@ using UnityEngine.UI;
 
 namespace TransparentHerA11y
 {
-    [BepInPlugin(Guid, "TransparentHer A11y Reader", "0.5.8")]
+    [BepInPlugin(Guid, "TransparentHer A11y Reader", "0.5.8a")]
     public class Plugin : BaseUnityPlugin
     {
         public const string Guid = "transparenther.a11y.reader";
@@ -35,6 +35,7 @@ namespace TransparentHerA11y
         internal static ConfigEntry<bool> CfgQuitConfirm;
         internal static ConfigEntry<string> CfgQuitNames;
         internal static ConfigEntry<string> CfgRepeatKey;
+        internal static ConfigEntry<string> CfgSpeechBackend;
 
         private Harmony _harmony;
 
@@ -52,6 +53,11 @@ namespace TransparentHerA11y
                 "朗读手机（WeSay）聊天消息。");
             CfgReadPhoneSticker = Config.Bind("朗读", "朗读手机表情", true,
                 "手机聊天里的表情/图片消息提示为「图片」。");
+            CfgSpeechBackend = Config.Bind("朗读", "语音后端", "自动",
+                "用哪个后端朗读。默认「自动」按 Tolk → NVDA → SAPI 的顺序挑第一个可用的。\n" +
+                "可以填：自动 / Tolk / NVDA / SAPI。\n" +
+                "钉死某一个主要用来排查问题（例如填 SAPI 就能确认系统语音这条路通不通）；\n" +
+                "钉死的后端不可用时**不会**回退到别的后端，而是彻底不出声。");
             CfgReadChoices = Config.Bind("朗读", "朗读选项", true,
                 "出现选项时朗读全部选项内容。");
             CfgChoiceHotkeys = Config.Bind("朗读", "数字键选择选项", true,

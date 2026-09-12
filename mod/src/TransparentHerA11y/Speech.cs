@@ -48,17 +48,83 @@ namespace TransparentHerA11y
 
         // ================= 初始化 =================
 
+        /// <summary>默认优先级：Tolk → NVDA → SAPI。</summary>
+        private static readonly Backend[] Default =
+            { Backend.Tolk, Backend.Nvda, Backend.Sapi };
+
+        /// <summary>
+        /// 后端优先级。配置「语音后端」填了具体值时只试那一个（排查用）。
+        /// log 为 null 时不打印配置写错的告警（重试路径上会刷屏）。
+        /// </summary>
+        private static Backend[] Order(ManualLogSource log)
+        {
+            string cfg = Plugin.CfgSpeechBackend != null ? Plugin.CfgSpeechBackend.Value : "";
+            string t = cfg != null ? cfg.Trim() : "";
+            if (t.Length == 0) return Default;
+
+            string u = t.ToUpperInvariant();
+            if (u == "自动" || u == "AUTO") return Default;
+
+            Backend forced;
+            if (ParseBackend(u, out forced)) return new[] { forced };
+
+            if (log != null)
+                log.LogWarning("配置「语音后端」的值认不出来：" + t
+                    + "（可用：自动 / Tolk / NVDA / SAPI），已按「自动」处理。");
+            return Default;
+        }
+
+        private static bool ParseBackend(string upper, out Backend b)
+        {
+            b = Backend.None;
+            if (upper == null) return false;
+            if (upper.Contains("TOLK")) { b = Backend.Tolk; return true; }
+            if (upper.Contains("NVDA")) { b = Backend.Nvda; return true; }
+            if (upper.Contains("SAPI")) { b = Backend.Sapi; return true; }
+            return false;
+        }
+
+        private static bool TryBackend(Backend b, ManualLogSource log)
+        {
+            switch (b)
+            {
+                case Backend.Tolk: return TryTolk(log);
+                case Backend.Nvda: return TryNvda(log);
+                case Backend.Sapi: return TrySapi(log);
+            }
+            return false;
+        }
+
+        /// <summary>把每个后端的结论串起来，日志里一眼能看出「为什么全灭」。</summary>
+        private static string Verdict(Backend b, string why)
+        {
+            string name;
+            switch (b)
+            {
+                case Backend.Tolk: name = "Tolk"; break;
+                case Backend.Nvda: name = "NVDA"; break;
+                case Backend.Sapi: name = "SAPI"; break;
+                default: name = "?"; break;
+            }
+            return name + "：" + (string.IsNullOrEmpty(why) ? "不可用" : why) + "；";
+        }
+
         public static void Init(ManualLogSource log)
         {
             if (_inited) return;
             _inited = true;
 
-            if (TryTolk(log)) { _backend = Backend.Tolk; return; }
-            if (TryNvda(log)) { _backend = Backend.Nvda; return; }
-            if (TrySapi(log)) { _backend = Backend.Sapi; return; }
+            var tried = new System.Text.StringBuilder();
+            foreach (Backend b in Order(log))
+            {
+                LastError = "";
+                if (!TryBackend(b, log)) { tried.Append(Verdict(b, LastError)); continue; }
+                _backend = b;
+                return;
+            }
 
             _backend = Backend.None;
-            log.LogWarning("没有可用的语音后端（Tolk / NVDA / SAPI 均不可用）。");
+            log.LogWarning("没有可用的语音后端。逐个结论：" + tried);
         }
 
         /// <summary>定期重试：NVDA 可能后启动，Tolk 也可能中途可用。</summary>
@@ -172,43 +238,27 @@ namespace TransparentHerA11y
 
         // ================= SAPI =================
 
-        // SPF_ASYNC 必须置位：SAPI 默认同步朗读，会阻塞 Unity 主线程导致游戏卡死
-        private const int SPF_ASYNC = 1;
-        private const int SPF_PURGEBEFORESPEAK = 2;
-
-        private static object _sapi;
-
+        /// <summary>
+        /// 交给 Sapi.cs（纯 P/Invoke + vtable）。
+        ///
+        /// v0.5.x 这里走的是 `Type.GetTypeFromProgID` + `InvokeMember` 的 COM 后期
+        /// 绑定，而 Unity 的 Mono **没有实现**它 —— 玩家机器上的日志：
+        ///     SAPI 不可用: NotImplementedException: The method or operation is not implemented.
+        /// 也就是说「SAPI 兜底」从来没出过声：只装了争渡（或什么读屏都没装）的
+        /// 机器上后端全灭，表现就是整局游戏一片安静。v0.5.8a 修复。
+        /// </summary>
         private static bool TrySapi(ManualLogSource log)
         {
             try
             {
-                Type t = Type.GetTypeFromProgID("SAPI.SpVoice");
-                if (t == null)
-                {
-                    LastError = "SAPI: 找不到 ProgID SAPI.SpVoice";
-                    return false;
-                }
-                _sapi = Activator.CreateInstance(t);
-                if (_sapi == null)
-                {
-                    LastError = "SAPI: 创建 SpVoice 失败";
-                    return false;
-                }
-                log.LogInfo("语音后端: SAPI（未检测到读屏软件，使用系统语音）");
+                if (!Sapi.TryInit(log)) { LastError = Sapi.LastError; return false; }
                 return true;
             }
             catch (Exception e)
             {
-                LastError = "SAPI 不可用: " + e.Message;
-                _sapi = null;
+                LastError = "SAPI 不可用: " + e.GetType().Name + ": " + e.Message;
                 return false;
             }
-        }
-
-        private static void SapiCall(string method, params object[] args)
-        {
-            if (_sapi == null) return;
-            _sapi.GetType().InvokeMember(method, BindingFlags.InvokeMethod, null, _sapi, args);
         }
 
         // ================= 对外接口 =================
@@ -234,10 +284,7 @@ namespace TransparentHerA11y
                         break;
 
                     case Backend.Sapi:
-                        {
-                            int flags = SPF_ASYNC | (interrupt ? SPF_PURGEBEFORESPEAK : 0);
-                            SapiCall("Speak", text, flags);
-                        }
+                        Sapi.Speak(text, interrupt);
                         break;
                 }
             }
@@ -263,8 +310,7 @@ namespace TransparentHerA11y
                         Nvda.Stop();
                         break;
                     case Backend.Sapi:
-                        // 用 SPF_PURGEBEFORESPEAK 朗读空串 = 清空队列
-                        SapiCall("Speak", "", SPF_ASYNC | SPF_PURGEBEFORESPEAK);
+                        Sapi.Stop();
                         break;
                 }
             }
@@ -279,6 +325,7 @@ namespace TransparentHerA11y
         {
             try { if (_tolkLoaded) Tolk_Unload(); } catch { }
             _tolkLoaded = false;
+            try { Sapi.Shutdown(); } catch { }
         }
     }
 }

@@ -255,6 +255,7 @@ namespace TransparentHerA11y
 
             var all = new List<string>();
             var mains = new List<string>();
+            int pathDenied = 0;
             string installDir = null;
             try { installDir = Path.GetDirectoryName(DllPath); } catch { }
 
@@ -275,6 +276,8 @@ namespace TransparentHerA11y
 
                     if (!byName && !byPath) continue;
 
+                    // 读不到路径的，基本都是提权运行的进程（高完整性级别）
+                    if (path.Length == 0) pathDenied++;
                     all.Add(name + "(" + pid + (title.Length > 0 ? " 「" + title + "」" : "") + ")");
 
                     // 「读屏本体」：名字里带 main，或者装在争渡目录里、但不是
@@ -300,8 +303,21 @@ namespace TransparentHerA11y
             else if (mains.Count > 0)
             {
                 sb.Append("。读屏本体在运行：" + string.Join("、", mains.ToArray())
-                    + " —— 那接口还报「没有运行或没有授权」，就只剩「没有授权」这一种解释了"
-                    + "（争渡的接口文档里，返回码 2 就是这么写的）");
+                    + " —— 那接口还报 2，只剩两种可能：① 没有授权（接口文档里返回码 2 就是这么写的）；"
+                    + "② 权限不对等，见下");
+            }
+
+            // 提权运行是这里最容易踩的坑：接口靠「往争渡的窗口发消息」来握手，
+            // 而 Windows 的 UIPI 会直接挡掉「低权限进程 → 高权限窗口」的消息，
+            // 于是接口永远认为读屏不在运行。实测玩家的争渡就是以管理员身份跑的
+            // （读不到它的进程路径就是证据）。
+            if (pathDenied > 0)
+            {
+                sb.Append("。【重要】有 " + pathDenied + " 个争渡进程读不到可执行文件路径，"
+                    + "这一般说明它们以**管理员身份**运行。游戏没提权时，接口发过去的握手消息"
+                    + "会被 Windows 的 UIPI 挡掉，接口就只能报「没有运行」。"
+                    + "**请试试用管理员身份运行游戏**（正式版要先以管理员身份启动 Steam 再启动游戏），"
+                    + "或者把争渡读屏改成普通权限启动");
             }
 
             sb.Append("。ZDSRAPI.ini：" + IniSummary(installDir));
@@ -430,8 +446,20 @@ namespace TransparentHerA11y
             _getState = g;
             _stop = t;
             DllPath = path;
-            log.LogInfo("[Speech] 已加载争渡读屏接口: " + path);
+            log.LogInfo("[Speech] 已加载争渡读屏接口: " + path + "（" + FileVersion(path) + "）");
             return true;
+        }
+
+        /// <summary>接口 dll 的文件版本。出问题时这一行很有用 —— 各版本的返回码不一样。</summary>
+        private static string FileVersion(string path)
+        {
+            try
+            {
+                System.Diagnostics.FileVersionInfo v = System.Diagnostics.FileVersionInfo.GetVersionInfo(path);
+                if (v != null && !string.IsNullOrEmpty(v.FileVersion)) return "版本 " + v.FileVersion;
+            }
+            catch { }
+            return "版本未知";
         }
 
         private static T Bind<T>(IntPtr module, string name) where T : class

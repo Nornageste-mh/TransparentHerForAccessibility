@@ -95,6 +95,7 @@ $procs = Get-Process -ErrorAction SilentlyContinue | Where-Object {
 }
 $mainNames = @()
 $zdsrCount = 0
+$pathDenied = 0
 if ($procs) {
     foreach ($p in $procs) {
         $path = ''
@@ -103,7 +104,7 @@ if ($procs) {
         try { $title = $p.MainWindowTitle } catch { }
         Say ("    {0}  PID={1}{2}{3}" -f $p.ProcessName, $p.Id,
              $(if ($title) { "  窗口「$title」" } else { '' }),
-             $(if ($path) { "  $path" } else { '' }))
+             $(if ($path) { "  $path" } else { '  （读不到路径：通常是提权或别的账户在跑）' }))
 
         # NVDA 是另一家的读屏，跟争渡的接口没关系，不参与下面的判断
         $isNvda = $p.ProcessName -match '(?i)nvda'
@@ -112,6 +113,7 @@ if ($procs) {
             ($installDir -and $path -and $path.StartsWith($installDir, [StringComparison]::OrdinalIgnoreCase)))
         if (-not $isZdsr) { continue }
         $zdsrCount++
+        if (-not $path) { $pathDenied++ }
 
         if ($p.ProcessName -notmatch '(?i)daemon|cloud|updat|helper' -and
             ($p.ProcessName -match '(?i)main' -or $p.ProcessName -match '(?i)zdsr|争渡')) {
@@ -128,7 +130,17 @@ if ($procs) {
         Say "    启动争渡读屏，确认它真的在给你读屏，再跑一次本脚本。"
     } else {
         Say ("  → 读屏本体在运行：" + ($mainNames -join '、'))
-        Say "    如果这样接口还是报 2，那就只剩「没有授权」这一种解释（见下面第 4 节）。"
+        Say "    如果这样接口还是报 2，见下面「权限」和「授权」两段。"
+    }
+
+    if ($pathDenied -gt 0) {
+        Say ""
+        Say "  【权限】有 $pathDenied 个争渡进程读不到可执行文件路径，这一般说明它们"
+        Say "    以**管理员身份**（或别的账户）在运行。争渡接口是靠「往争渡的窗口发消息」"
+        Say "    来确认读屏在不在的，而 Windows 的 UIPI 会挡掉「低权限程序 → 高权限窗口」"
+        Say "    的消息 —— 于是接口只能报「没有运行」。"
+        Say "    对策：**用管理员身份启动游戏**（正式版要先把 Steam 也以管理员身份启动），"
+        Say "    或者把争渡读屏改成普通权限启动，两边权限一致。"
     }
 } else {
     Say "    争渡目录里一个进程都没有 —— 争渡没在运行。"
@@ -189,7 +201,7 @@ public static class ZdsrProbe {
                 2 { '争渡读屏没有运行或没有授权' }
                 3 { '正在朗读' }
                 4 { '空闲（争渡在运行）' }
-                default { "未知（$st）" }
+                default { "未知返回码 $st（新版本接口才有，旧文档里没有 —— 这一行最有价值，请发回来）" }
             }
         }
 
@@ -225,7 +237,8 @@ public static class ZdsrProbe {
                 [ZdsrProbe]::StopSpeak()
             }
         } else {
-            Say "（没加 -Speak，所以没有真的朗读。想试发声就加 -Speak 再跑一次）"
+            Say "（没加 -Speak，所以没有真的朗读。**强烈建议加 -Speak 再跑一次** ——"
+            Say "  两条通道各自的 Speak 返回码是判断「能不能用它朗读」的关键数据）"
         }
     } catch {
         Say ("调用接口时出错：{0}" -f $_.Exception.Message)

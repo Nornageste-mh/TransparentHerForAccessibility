@@ -284,64 +284,27 @@ namespace TransparentHerA11y
 
         // ================= SAPI =================
 
-        // SPF_ASYNC 必须置位：SAPI 默认同步朗读，会阻塞 Unity 主线程导致游戏卡死
-        private const int SPF_ASYNC = 1;
-        private const int SPF_PURGEBEFORESPEAK = 2;
-
-        /// <summary>SpVoice 的 CLSID。ProgID 查不到时用它再试一次。</summary>
-        private static readonly Guid SpVoiceClsid = new Guid("96749377-3391-11D2-9EE3-00C04F797396");
-
-        private static object _sapi;
-
+        /// <summary>
+        /// 交给 Sapi.cs（纯 P/Invoke + vtable）。
+        ///
+        /// v0.5.x 这里走的是 `Type.GetTypeFromProgID` + `InvokeMember` 的 COM 后期
+        /// 绑定，而 Unity 的 Mono **没有实现**它 —— 玩家机器上的日志：
+        ///     SAPI 不可用: NotImplementedException: The method or operation is not implemented.
+        /// 也就是说「SAPI 兜底」从来没出过声。只装争渡的机器上四级后端全灭，
+        /// 表现就是整局游戏一片安静。
+        /// </summary>
         private static bool TrySapi(ManualLogSource log)
         {
             try
             {
-                Type t = null;
-                string why = "";
-                try { t = Type.GetTypeFromProgID("SAPI.SpVoice"); }
-                catch (Exception e) { why = "GetTypeFromProgID: " + e.Message; }
-
-                if (t == null)
-                {
-                    try { t = Type.GetTypeFromCLSID(SpVoiceClsid); }
-                    catch (Exception e) { why = "GetTypeFromCLSID: " + e.Message; }
-                }
-
-                if (t == null)
-                {
-                    LastError = "SAPI: 找不到 SAPI.SpVoice" + (why.Length > 0 ? "（" + why + "）" : "");
-                    return false;
-                }
-
-                _sapi = Activator.CreateInstance(t);
-                if (_sapi == null)
-                {
-                    LastError = "SAPI: 创建 SpVoice 失败";
-                    return false;
-                }
-
-                // 先读一个属性，验证「后期绑定」这条路真的通。Mono 对 IDispatch
-                // 的支持如果不完整，会在这一行暴露出来，而不是等玩家需要朗读的
-                // 时候静默失败 —— 那正是「机器上装了争渡但什么都没念」的典型症状：
-                // 后端选了 SAPI，Speak 却一直抛异常，玩家只听到一片安静。
-                object vol = _sapi.GetType().InvokeMember("Volume", BindingFlags.GetProperty, null, _sapi, null);
-
-                log.LogInfo("语音后端: SAPI（没检测到读屏软件，用系统语音朗读，音量 " + vol + "）");
+                if (!Sapi.TryInit(log)) { LastError = Sapi.LastError; return false; }
                 return true;
             }
             catch (Exception e)
             {
                 LastError = "SAPI 不可用: " + e.GetType().Name + ": " + e.Message;
-                _sapi = null;
                 return false;
             }
-        }
-
-        private static void SapiCall(string method, params object[] args)
-        {
-            if (_sapi == null) return;
-            _sapi.GetType().InvokeMember(method, BindingFlags.InvokeMethod, null, _sapi, args);
         }
 
         // ================= 对外接口 =================
@@ -382,10 +345,7 @@ namespace TransparentHerA11y
                         break;
 
                     case Backend.Sapi:
-                        {
-                            int flags = SPF_ASYNC | (interrupt ? SPF_PURGEBEFORESPEAK : 0);
-                            SapiCall("Speak", text, flags);
-                        }
+                        Sapi.Speak(text, interrupt);
                         break;
                 }
             }
@@ -432,8 +392,7 @@ namespace TransparentHerA11y
                         Nvda.Stop();
                         break;
                     case Backend.Sapi:
-                        // 用 SPF_PURGEBEFORESPEAK 朗读空串 = 清空队列
-                        SapiCall("Speak", "", SPF_ASYNC | SPF_PURGEBEFORESPEAK);
+                        Sapi.Stop();
                         break;
                 }
             }
@@ -447,6 +406,7 @@ namespace TransparentHerA11y
         public static void Shutdown()
         {
             try { if (_backend == Backend.Zdsr) Zdsr.Stop(); } catch { }
+            try { Sapi.Shutdown(); } catch { }
             try { if (_tolkLoaded) Tolk_Unload(); } catch { }
             _tolkLoaded = false;
         }

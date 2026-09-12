@@ -90,6 +90,13 @@ namespace TransparentHerA11y
         private static bool _fatal;          // 版本不匹配之类：本次游戏进程内不再试
         private static float _retryAt;       // 冷却到期时间（realtimeSinceStartup）
         private static bool _missingLogged;  // 「找不到 dll」只详细提醒一次
+        private static int _failCount;       // 状态判断失败的次数（控制日志频率）
+
+        /// <summary>
+        /// 争渡明明开着、接口却说「没运行」时用来试探的那句话。
+        /// 试探成功（Speak 返回 0）就会真的念出来，所以它得是一句像样的话。
+        /// </summary>
+        private const string ProbeText = "争渡读屏已连接到无障碍朗读模组。";
 
         /// <summary>已加载的接口 dll 路径（日志用）。</summary>
         public static string DllPath = "";
@@ -158,16 +165,73 @@ namespace TransparentHerA11y
 
             if (st == 2)
             {
-                // 争渡没运行。接口本身没问题，等一会儿再问；争渡起来后重新初始化一次。
-                _inited = false;
+                // 接口说「争渡没运行」。但**别急着下结论**：v0.6.0 preview 的实机日志里，
+                // 玩家明明开着争渡，GetSpeakState() 照样返回 2。
+                // 所以这里再补一刀：直接念一句试探文本，看接口收不收（收下返回 0）。
+                // 收下就说明通道是通的 —— 那多半只是接口的「找读屏」那一环没认出来。
+                int rcProbe = Speak(ProbeText, false);
+                if (rcProbe == 0)
+                {
+                    _inited = true;
+                    LastError = "";
+                    log.LogWarning("[Speech] 争渡接口报告「没有运行」（GetSpeakState=2），"
+                        + "但 Speak 一句试探文本返回 0（成功）—— 已按「争渡可用」处理，"
+                        + "这句试探文本如果能听到，就是它念的。"
+                        + "若实际没有声音，把配置「语音后端」改成 SAPI 即可改用系统语音。");
+                    return true;
+                }
+
+                _inited = false;                      // 争渡起来之后重新初始化一次
                 _retryAt = UnityEngine.Time.realtimeSinceStartup + RetrySeconds;
-                LastError = "争渡读屏没有运行";
+                LastError = "争渡读屏没有运行（" + LastStateText + "，试探 Speak=" + rcProbe + "）";
+
+                if (_failCount <= 1 || _failCount % 10 == 0)
+                    log.LogWarning("[Speech] " + LastError + "。" + ReaderProcesses());
+                _failCount++;
+
                 return false;
             }
 
             _retryAt = UnityEngine.Time.realtimeSinceStartup + RetrySeconds;
             LastError = LastStateText;
+            if (_failCount <= 1 || _failCount % 10 == 0)
+                log.LogWarning("[Speech] 争渡接口状态异常：" + LastStateText + "。" + ReaderProcesses());
+            _failCount++;
             return false;
+        }
+
+        /// <summary>
+        /// 把「当前进程里有没有看起来像读屏的进程」写进日志。
+        /// 这行是给人看的：如果这里明明列出了争渡的进程，而接口仍说「没运行」，
+        /// 就能确定问题出在接口自己的识别环节，而不是玩家没开读屏。
+        /// </summary>
+        private static string ReaderProcesses()
+        {
+            var found = new List<string>();
+            try
+            {
+                foreach (System.Diagnostics.Process p in System.Diagnostics.Process.GetProcesses())
+                {
+                    string n = null;
+                    try { n = p.ProcessName; } catch { }
+                    if (string.IsNullOrEmpty(n)) continue;
+
+                    string l = n.ToLowerInvariant();
+                    if (l.IndexOf("zdsr", StringComparison.Ordinal) < 0
+                        && !l.StartsWith("zd", StringComparison.Ordinal)
+                        && l.IndexOf("nvda", StringComparison.Ordinal) < 0
+                        && l.IndexOf("争渡", StringComparison.Ordinal) < 0) continue;
+
+                    string path = "";
+                    try { path = p.MainModule != null ? p.MainModule.FileName : ""; } catch { }
+                    found.Add(n + "(" + p.Id + (path.Length > 0 ? " " + path : "") + ")");
+                }
+            }
+            catch { }
+
+            return found.Count > 0
+                ? "当前进程里像读屏的有：" + string.Join("、", found.ToArray())
+                : "当前进程里没看到像读屏的进程（名字里带 zdsr / zd / nvda 的一个都没有）";
         }
 
         // ================= 朗读 =================

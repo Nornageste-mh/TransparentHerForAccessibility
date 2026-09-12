@@ -125,6 +125,7 @@ cd mod
 │  │  ├─ Plugin.cs              补丁与朗读逻辑
 │  │  ├─ Speech.cs              争渡 / Tolk / NVDA / SAPI 后端调度与降级
 │  │  ├─ Zdsr.cs                争渡读屏 ZDSRAPI 封装（运行时动态加载）
+│  │  ├─ Sapi.cs                系统语音兜底（纯 P/Invoke + vtable，不用 COM 互操作）
 │  │  ├─ Nvda.cs                NVDA Controller Client 封装
 │  │  └─ UiNav.cs               界面键盘导航与朗读
 │  └─ package/                  安装包（直接拷进游戏根目录）

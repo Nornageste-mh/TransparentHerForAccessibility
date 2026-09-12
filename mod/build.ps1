@@ -82,6 +82,32 @@ if ($nvdaDll) {
 
 # ------------------------------------------------------------
 Step "4/5  编译插件"
+
+# 发布前守卫：BepInPlugin 的版本号必须能被解析成版本号。
+# 它不是给人看的显示名 —— 填 "0.5.8a" 这类带字母的写法，BepInEx 会判定
+# 「version is invalid」并**静默跳过整个插件**：日志里只有一行 Warning，
+# 表现是模组完全没加载、游戏里一片安静，极难排查（v0.5.8a 第一版就踩了）。
+# 想表达 0.5.8a 这种「第五版修订」，用第四位数字：0.5.8.1。
+$pluginCs = Join-Path $mod "src\TransparentHerA11y\Plugin.cs"
+$m = Select-String -LiteralPath $pluginCs -Pattern 'BepInPlugin\([^)]*"([^"]+)"\s*\)' | Select-Object -First 1
+if (-not $m) { Write-Host "    在 Plugin.cs 里找不到 BepInPlugin 特性" -ForegroundColor Red; exit 1 }
+$pluginVer = $m.Matches[0].Groups[1].Value
+$parsed = $null
+if (-not [System.Version]::TryParse($pluginVer, [ref]$parsed)) {
+    Write-Host "    BepInPlugin 版本号 `"$pluginVer`" 不是合法版本号。" -ForegroundColor Red
+    Write-Host "    BepInEx 会因此跳过整个插件（日志：version is invalid）。"
+    Write-Host "    请改成纯数字形式，例如 0.5.8.1"
+    exit 1
+}
+try {
+    $asmVer = ([xml](Get-Content -LiteralPath (Join-Path $mod "src\TransparentHerA11y\TransparentHerA11y.csproj") -Raw)).Project.PropertyGroup.Version
+    if ($asmVer -and $asmVer.Trim() -ne $pluginVer) {
+        Write-Host "    版本号不一致：csproj=$asmVer  BepInPlugin=$pluginVer" -ForegroundColor Red
+        Write-Host "    两处必须一致，否则插件版本与程序集版本会对不上。"
+        exit 1
+    }
+} catch { Write-Host "    （csproj 版本号读取失败，已跳过一致性检查）" -ForegroundColor Yellow }
+Ok "版本号 $pluginVer（合法，且与 csproj 一致）"
 Push-Location (Join-Path $mod "src\TransparentHerA11y")
 try {
     dotnet build -c Release -v minimal -nowarn:MSB3277

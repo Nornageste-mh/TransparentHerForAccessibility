@@ -185,6 +185,23 @@ PDB 里原本有 Source Link 写进去的 `raw.githubusercontent` 文档，但�
   `没有可用的语音后端。逐个结论：Tolk：…；NVDA：…；SAPI：…；`
 - `Speech.Shutdown()` 现在会释放 SpVoice 并 `CoUninitialize`。
 
+### 发版当天补的一个跟头（值得记下来）
+
+第一版发布时，`BepInPlugin` 的版本号我按发布名写成了 `"0.5.8a"`。
+结果玩家那边：**插件一行都没加载**，日志只有一句
+
+    [Warning: BepInEx] Skipping type [TransparentHerA11y.Plugin] because its version is invalid.
+    [Info   : BepInEx] 0 plugins to load
+
+原因：`BepInPlugin` 的版本号字段**不是给人看的显示名**，它必须能被解析成
+版本号（`System.Version.TryParse`）。带字母的写法会直接被判定非法，
+BepInEx 随即**静默跳过整个插件** —— 游戏里一片安静，和「没装模组」一模一样，
+极难往版本号上想。
+
+修法：特性里改用 `"0.5.8.1"`（第四位数字承载 a 这次修订），发布名仍是 v0.5.8a。
+并在 `build.ps1` 里加了**发布前守卫**：版本号必须是合法版本号、且与 csproj 一致，
+否则直接中断构建 —— 这类错误以后在本地就会被拦下。
+
 ### 说明
 
 这一版的改动是**从 v0.6.x 预览线里单独摘出来的 SAPI 修复**。

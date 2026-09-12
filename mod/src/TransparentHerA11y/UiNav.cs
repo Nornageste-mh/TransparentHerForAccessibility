@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Text;
 using TMPro;
 using UnityEngine;
@@ -86,6 +87,11 @@ namespace TransparentHerA11y
             public int CanvasOrder;
             public int SiblingIndex;
             public readonly List<Selectable> Items = new List<Selectable>();
+
+            // 本组所在 Canvas 的世界矩形与相机：用来判断成员是不是真的在画面上
+            public Rect CanvasRect;
+            public bool HasCanvasRect;
+            public Camera Camera;
         }
 
         private static readonly List<Group> Groups = new List<Group>();
@@ -95,6 +101,8 @@ namespace TransparentHerA11y
         private static bool _active;
         private static int _index;
         private static int _pendingRescanFrame = -1;
+        // 稍晚再补一次重扫：面板常常有滑入/淡入动画，下一帧新控件可能还没激活
+        private static int _pendingRescanFrame2 = -1;
 
         // 视觉反馈用：我们自己借 EventSystem 选中过的对象，退出时要清掉
         private static GameObject _selectedByUs;
@@ -106,6 +114,9 @@ namespace TransparentHerA11y
         // 上一次朗读过的控件。重扫后如果这个位置换了别的控件，必须重新播报 ——
         // 否则玩家以为还停在刚才听的那一项上，按下去却是另一个东西。
         private static Selectable _announcedItem;
+
+        // 当前项失效时我们请求过一次重扫，记下来免得每帧都重扫
+        private static Selectable _rescanRequestedFor;
 
         // 场景切换防护
         private static int _lastSceneHandle = int.MinValue;
@@ -239,21 +250,67 @@ namespace TransparentHerA11y
             int keepGroupSibling = (Groups.Count > 0 && _groupIndex >= 0 && _groupIndex < Groups.Count)
                 ? Groups[_groupIndex].SiblingIndex : int.MinValue;
             Groups.Clear();
+            _inputRoles.Clear();   // 实例 ID 会在对象销毁后被复用，每次重扫都重算
+            _rescanRequestedFor = null;
             if (!SceneStable()) return;
 
             try
             {
+                bool diag = Plugin.CfgDiagLog != null && Plugin.CfgDiagLog.Value;
+                List<string> excluded = diag ? new List<string>() : null;
+                int inactive = 0, noCanvas = 0;
+                Scene activeScene = SceneManager.GetActiveScene();
+
                 Selectable[] all = Resources.FindObjectsOfTypeAll<Selectable>();
                 for (int i = 0; i < all.Length; i++)
                 {
                     Selectable s = all[i];
                     if (s == null) continue;                       // Unity 伪空：已销毁对象在此拦下
-                    if (!s.isActiveAndEnabled) continue;
+                    if (!s.isActiveAndEnabled)
+                    {
+                        // 诊断：把「场景里有、但没纳入导航」的控件也记下来。
+                        // 只看当前场景，且最多 20 条，否则隐藏面板会淹没日志。
+                        if (diag && inactive < 20 && s.gameObject.scene.IsValid()
+                            && s.gameObject.scene == activeScene)
+                        {
+                            excluded.Add("[未激活] " + PathOf(s.transform));
+                            inactive++;
+                        }
+                        continue;
+                    }
                     if (!s.gameObject.scene.IsValid()) continue;   // 排除预制体资源
                     if (!(s.transform is RectTransform)) continue; // 只处理 UI
 
                     Group g = GroupOf(s);
                     if (g != null) g.Items.Add(s);
+                    else if (diag && noCanvas < 10)
+                    {
+                        excluded.Add("[不在 Canvas 下] " + PathOf(s.transform));
+                        noCanvas++;
+                    }
+                }
+
+                // 只留下**真的在画面上**的控件。这一步必须在排序之前做：
+                // 画面外/被挡住的控件不但念了没用，还会把编号撑大（「1 / 13」）。
+                if (Plugin.CfgVisibleOnly == null || Plugin.CfgVisibleOnly.Value)
+                {
+                    for (int i = 0; i < Groups.Count; i++)
+                    {
+                        Group g = Groups[i];
+                        if (diag)
+                        {
+                            g.Items.RemoveAll(s =>
+                            {
+                                bool ok = VisiblyClickable(s, g);
+                                if (!ok && excluded.Count < 60) excluded.Add("[画面外或点不到] " + PathOf(s.transform));
+                                return !ok;
+                            });
+                        }
+                        else
+                        {
+                            g.Items.RemoveAll(s => !VisiblyClickable(s, g));
+                        }
+                    }
                 }
 
                 // 组排序：Canvas 层级高的、兄弟序号靠后的（在更上层）排前面
@@ -283,6 +340,8 @@ namespace TransparentHerA11y
                     }
                     Plugin.Log.LogInfo(sb.ToString());
                 }
+
+                DumpScan(excluded);
             }
             catch (Exception e)
             {
@@ -316,8 +375,15 @@ namespace TransparentHerA11y
                     {
                         Root = top,
                         CanvasOrder = c.sortingOrder,
-                        SiblingIndex = top.GetSiblingIndex()
+                        SiblingIndex = top.GetSiblingIndex(),
+                        Camera = c.renderMode == RenderMode.ScreenSpaceOverlay ? null : c.worldCamera
                     };
+                    RectTransform crt = c.transform as RectTransform;
+                    if (crt != null)
+                    {
+                        g.CanvasRect = WorldRect(crt);
+                        g.HasCanvasRect = true;
+                    }
                     Groups.Add(g);
                 }
                 return g;
@@ -326,41 +392,87 @@ namespace TransparentHerA11y
         }
 
         /// <summary>
-        /// 组内排序：按兄弟序号路径逐级比较（后渲染者在上层），
-        /// 同一层级再按屏幕位置（先上后下、同行先左后右）。
+        /// 组内排序：**按屏幕位置**（先上后下，同一行先左后右），
+        /// 位置重合时才退回渲染层级（兄弟序号路径）决定先后。
+        ///
+        /// === 为什么改成位置优先 ===
+        /// 原来以兄弟序号路径为主。但路径表达的是「谁后渲染、谁在上层」，
+        /// 跟画面上看到的上下左右没有必然关系：实测有界面出现
+        /// 「上面的控件是 2/x、下面的反而是 1/x」。
+        /// 读屏用户是靠「第几项」建立空间印象的（部分视力用户还会
+        /// 对着屏幕找），顺序必须和画面一致，否则每项都要重新试。
+        ///
+        /// 行号用「向上量化到 4 像素」的格子算，而不是直接比浮点 y：
+        /// 比较函数必须是**可传递**的全序。若用「差值小于阈值就算同一行」
+        /// 这种写法，可能出现 a≈b、b≈c 但 a 与 c 不同行的情况，
+        /// List.Sort 会抛「比较函数不一致」，而这里被 try 兜住后
+        /// 会把整组清空、界面导航直接退出。量化不存在这个问题。
         /// </summary>
         private static void SortWithin(Group g)
         {
-            g.Items.Sort((a, b) =>
+            // 开关见配置「按屏幕位置排序控件」：关掉就退回旧的渲染层级排序，
+            // 方便对比「顺序错乱 / 控件定位不到」到底是不是这个改动引起的。
+            bool byPosition = Plugin.CfgSortByPosition == null || Plugin.CfgSortByPosition.Value;
+
+            var keys = new List<ItemKey>(g.Items.Count);
+            for (int i = 0; i < g.Items.Count; i++)
             {
-                if (a == null || b == null) return 0;
+                Selectable s = g.Items[i];
+                var k = new ItemKey { S = s, Row = int.MinValue, Left = float.MaxValue, Path = null };
+                try
+                {
+                    RectTransform rt = s != null ? s.transform as RectTransform : null;
+                    if (byPosition && rt != null)
+                    {
+                        rt.GetWorldCorners(_corners);   // 0=左下 1=左上 2=右上 3=右下
+                        float top = Mathf.Max(_corners[1].y, _corners[2].y);
+                        k.Left = Mathf.Min(_corners[0].x, _corners[1].x);
+                        k.Row = Mathf.RoundToInt(top / 4f);
+                    }
+                    if (s != null) k.Path = PathIndices(s.transform, g.Root).ToArray();
+                }
+                catch { }
+                keys.Add(k);
+            }
 
-                int cmp = ComparePath(a.transform, b.transform, g.Root);
-                if (cmp != 0) return cmp;
+            if (byPosition) keys.Sort(CompareKey);
+            else keys.Sort(ComparePathOnly);
 
-                RectTransform ra = a.transform as RectTransform;
-                RectTransform rb = b.transform as RectTransform;
-                if (ra == null || rb == null) return 0;
-                float ya = ra.position.y, yb = rb.position.y;
-                if (Mathf.Abs(ya - yb) > 24f) return yb.CompareTo(ya);
-                return ra.position.x.CompareTo(rb.position.x);
-            });
+            g.Items.Clear();
+            for (int i = 0; i < keys.Count; i++) g.Items.Add(keys[i].S);
         }
 
-        /// <summary>
-        /// 从组根往下逐级比较兄弟序号，值大者（更靠上层）排前面。
-        /// 返回负数表示 a 应排在 b 之前。
-        /// </summary>
-        private static int ComparePath(Transform a, Transform b, Transform root)
+        private struct ItemKey
         {
-            List<int> pa = PathIndices(a, root);
-            List<int> pb = PathIndices(b, root);
-            int n = Mathf.Min(pa.Count, pb.Count);
+            public Selectable S;
+            public int Row;        // 屏幕上下：值越大越靠上
+            public float Left;     // 屏幕左右：值越小越靠左
+            public int[] Path;     // 渲染层级，仅用于位置完全重合时
+        }
+
+        private static readonly Vector3[] _corners = new Vector3[4];
+
+        private static int CompareKey(ItemKey a, ItemKey b)
+        {
+            if (a.Row != b.Row) return b.Row.CompareTo(a.Row);                        // 上 → 下
+            if (Mathf.Abs(a.Left - b.Left) > 0.01f) return a.Left.CompareTo(b.Left);  // 左 → 右
+            return CompareIndexPath(a.Path, b.Path);                                  // 重合看渲染层级
+        }
+
+        private static int ComparePathOnly(ItemKey a, ItemKey b)
+        {
+            return CompareIndexPath(a.Path, b.Path);
+        }
+
+        private static int CompareIndexPath(int[] pa, int[] pb)
+        {
+            if (pa == null || pb == null) return 0;
+            int n = Mathf.Min(pa.Length, pb.Length);
             for (int i = 0; i < n; i++)
             {
-                if (pa[i] != pb[i]) return pb[i].CompareTo(pa[i]);
+                if (pa[i] != pb[i]) return pb[i].CompareTo(pa[i]);   // 后渲染的在上层
             }
-            return pb.Count.CompareTo(pa.Count);   // 更深的（更靠内层）在后
+            return pb.Length.CompareTo(pa.Length);   // 更深的（更靠内层）在后
         }
 
         private static List<int> PathIndices(Transform t, Transform root)
@@ -374,6 +486,160 @@ namespace TransparentHerA11y
             }
             list.Reverse();
             return list;
+        }
+
+        // ================= 可见性判断 =================
+
+        /// <summary>RectTransform 的世界坐标外接矩形。</summary>
+        private static Rect WorldRect(RectTransform rt)
+        {
+            rt.GetWorldCorners(_corners);   // 0=左下 1=左上 2=右上 3=右下
+            float minX = Mathf.Min(Mathf.Min(_corners[0].x, _corners[1].x), Mathf.Min(_corners[2].x, _corners[3].x));
+            float maxX = Mathf.Max(Mathf.Max(_corners[0].x, _corners[1].x), Mathf.Max(_corners[2].x, _corners[3].x));
+            float minY = Mathf.Min(Mathf.Min(_corners[0].y, _corners[1].y), Mathf.Min(_corners[2].y, _corners[3].y));
+            float maxY = Mathf.Max(Mathf.Max(_corners[0].y, _corners[1].y), Mathf.Max(_corners[2].y, _corners[3].y));
+            return Rect.MinMaxRect(minX, minY, maxX, maxY);
+        }
+
+        /// <summary>
+        /// 控件是不是**真的在画面上**：矩形要和 Canvas 相交，而且从它中心发出的一次
+        /// UI 射线要能打到它（或它的子物体）身上。
+        ///
+        /// === 为什么必须加这道判断 ===
+        /// 标题场景里 `Canvas/Panel/Phone/...` 那整套按钮是 active 的，但手机面板
+        /// 停在画面外（anchoredPosition.x = 1260，而 START/EXIT 在 -2713），
+        /// 屏幕上一个像素都看不到。只判断 isActiveAndEnabled 会把它们全纳入导航 ——
+        /// 于是画面上明明是 START/EXIT，方向键却在走「读档 / 存档」，
+        /// 按回车还真的弹出读档确认框，因为 **Unity 的按钮根本不关心自己有没有被画出来**。
+        ///
+        /// 判不出来时一律「不排除」：少一个控件是功能缺失，多一个控件只是噪声。
+        /// </summary>
+        private static bool VisiblyClickable(Selectable s, Group g)
+        {
+            try
+            {
+                RectTransform rt = s.transform as RectTransform;
+                if (rt == null) return true;
+
+                // 1) 和 Canvas 矩形完全不相交 = 画面外
+                if (g.HasCanvasRect)
+                {
+                    Rect r = WorldRect(rt);
+                    if (r.xMax < g.CanvasRect.xMin - 2f || r.xMin > g.CanvasRect.xMax + 2f) return false;
+                    if (r.yMax < g.CanvasRect.yMin - 2f || r.yMin > g.CanvasRect.yMax + 2f) return false;
+                }
+
+                // 2) 从中心打一条 UI 射线，看能不能打到自己
+                EventSystem es = EventSystem.current;
+                if (es == null) return true;
+
+                Vector3 world = rt.TransformPoint(rt.rect.center);
+                Vector2 screen = RectTransformUtility.WorldToScreenPoint(g.Camera, world);
+                var ped = new PointerEventData(es) { position = screen };
+                var hits = new List<RaycastResult>();
+                es.RaycastAll(ped, hits);
+                if (hits.Count == 0) return true;      // 射线本身打不到任何东西 → 判不出来，不排除
+
+                for (int i = 0; i < hits.Count; i++)
+                {
+                    GameObject hit = hits[i].gameObject;
+                    if (hit == null) continue;
+                    // 只认「打到自己或自己的子物体」。**不能**认祖先：
+                    // 整屏背景通常就是所有控件的共同祖先，认了它等于这道判断失效。
+                    if (hit == s.gameObject || hit.transform.IsChildOf(s.transform)) return true;
+                }
+                return false;
+            }
+            catch { return true; }
+        }
+
+        // ================= 诊断（配置「界面诊断日志」打开时才输出）=================
+
+        /// <summary>控件在层级里的路径，形如 Canvas/Panel/Confirm/Yes。</summary>
+        private static string PathOf(Transform t)
+        {
+            try
+            {
+                var stack = new List<string>();
+                Transform cur = t;
+                int guard = 0;
+                while (cur != null && guard++ < 12)
+                {
+                    stack.Add(cur.gameObject.name);
+                    cur = cur.parent;
+                }
+                var sb = new StringBuilder();
+                for (int i = stack.Count - 1; i >= 0; i--)
+                {
+                    if (sb.Length > 0) sb.Append('/');
+                    sb.Append(stack[i]);
+                }
+                return sb.ToString();
+            }
+            catch { return "?"; }
+        }
+
+        private static string RowLeftOf(Selectable s)
+        {
+            try
+            {
+                RectTransform rt = s != null ? s.transform as RectTransform : null;
+                if (rt == null) return "位置=?";
+                rt.GetWorldCorners(_corners);
+                float top = Mathf.Max(_corners[1].y, _corners[2].y);
+                float left = Mathf.Min(_corners[0].x, _corners[1].x);
+                return "行=" + Mathf.RoundToInt(top / 4f) + " 顶=" + Mathf.RoundToInt(top)
+                     + " 左=" + Mathf.RoundToInt(left);
+            }
+            catch { return "位置=?"; }
+        }
+
+        /// <summary>
+        /// 把这次扫描的结果写进日志：每一组的每一项念什么、在屏幕哪儿、层级路径是什么，
+        /// 以及「场景里有、但没被纳入导航」的控件。
+        /// 我这边没法启动游戏，只能靠这份日志定位「某个控件找不到」「只念类型不念文字」。
+        /// </summary>
+        private static void DumpScan(List<string> excluded)
+        {
+            try
+            {
+                if (Plugin.CfgDiagLog == null || !Plugin.CfgDiagLog.Value) return;
+                if (Plugin.Log == null) return;
+
+                var sb = new StringBuilder();
+                sb.Append("[UiNav] ===== 诊断：共 ").Append(Groups.Count).Append(" 组 =====");
+                for (int gi = 0; gi < Groups.Count; gi++)
+                {
+                    Group g = Groups[gi];
+                    sb.Append("\n[组 ").Append(gi + 1).Append(gi == _groupIndex ? " ★当前" : "")
+                      .Append("] ").Append(g.Root != null ? PathOf(g.Root) : "?")
+                      .Append("  项数=").Append(g.Items.Count);
+                }
+                if (Groups.Count > 0 && _groupIndex >= 0 && _groupIndex < Groups.Count)
+                {
+                    Group g = Groups[_groupIndex];
+                    for (int i = 0; i < g.Items.Count; i++)
+                    {
+                        Selectable s = g.Items[i];
+                        string desc = "?";
+                        try { desc = Describe(s); } catch (Exception e) { desc = "<Describe 抛异常: " + e.Message + ">"; }
+                        sb.Append("\n  #").Append(i + 1).Append(' ').Append(desc)
+                          .Append("   [").Append(s != null ? RowLeftOf(s) : "null").Append(']')
+                          .Append("  ").Append(s != null ? PathOf(s.transform) : "null");
+                    }
+                }
+                if (excluded != null && excluded.Count > 0)
+                {
+                    sb.Append("\n[有控件但没纳入导航 ").Append(excluded.Count).Append(" 条]");
+                    for (int i = 0; i < excluded.Count; i++) sb.Append("\n  ").Append(excluded[i]);
+                }
+                sb.Append("\n[UiNav] ==== 诊断结束 ====");
+                Plugin.Log.LogInfo(sb.ToString());
+            }
+            catch (Exception e)
+            {
+                try { Plugin.Log.LogError("诊断输出失败: " + e.Message); } catch { }
+            }
         }
 
         // ================= 描述 =================
@@ -439,6 +705,28 @@ namespace TransparentHerA11y
             { "TopWindowOption",   "画面位于最前" },
 
             { "CharacterVolumePanel", "角色音量" },
+
+            // ---- 纯图片按钮 ----
+            // 下面这些按钮的文字**画在图片上**，组件里一个字都没有：把 level1-level5
+            // 全部 MonoBehaviour 的字节扫一遍，这些对象里只有按钮状态名
+            // （Normal/Highlighted/Pressed）和回调名，没有任何文本。
+            // 中文名取自游戏自己的本地化表：
+            //   alert.confirm = 确定        alert.cancel = 取消
+            //   bookmark.save.button = 存档  bookmark.load.button = 读档
+            //   config.quitgame = 退出游戏    ingame.quit.confirm = 要退出游戏吗？
+            // 回调名也对得上：姓名确认框的 Yes → OnConfirm，No → OnCancel。
+            //
+            // 别名只在控件**自己子树里没有文字**时才会被用到（见 TextOf），
+            // 所以不会盖掉正常按钮的朗读。
+            { "Yes",     "确定" },
+            { "No",      "取消" },
+            { "Confirm", "确定" },
+            { "Cancel",  "取消" },
+            { "Save",    "存档" },
+            { "Load",    "读档" },
+            { "Exit",    "退出" },
+            { "Skip",    "跳过" },
+            { "Start",   "开始" },
         };
 
         /// <summary>
@@ -474,10 +762,40 @@ namespace TransparentHerA11y
         /// 从场景里读不到静态文字（运行期才由本地化表填进去），无法确认是哪一种，
         /// 两种都认最省事，也不会有副作用。
         /// </summary>
+        /// <summary>
+        /// parent 子树里除了 exclude（这个控件自己那一支）之外，还有没有别的 Selectable。
+        ///
+        /// 用来区分「一行」和「一个面板」：
+        ///   · 一行（设置面板的 BGMSlider 之类）里只有这一个控件 + 一段标签文字
+        ///   · 面板（手机面板的 Buttons/Image）里塞着一堆控件
+        /// 面板里的文字是标题，不能当成本控件的标签 —— 手机面板顶上那行「通讯」
+        /// 原来就是这样被当成了里面**每一个**按钮的标签，整屏按钮全念「通讯」。
+        /// </summary>
+        private static bool HasOtherSelectable(Transform parent, Transform exclude)
+        {
+            try
+            {
+                Selectable[] all = parent.GetComponentsInChildren<Selectable>(true);
+                for (int i = 0; i < all.Length; i++)
+                {
+                    Selectable s = all[i];
+                    if (s == null) continue;
+                    Transform t = s.transform;
+                    if (t == exclude || t.IsChildOf(exclude)) continue;
+                    return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
         private static string FirstTextOutside(Transform parent, Transform exclude)
         {
             try
             {
+                // 这个容器里还有别的控件 → 它是面板，不是「一行」
+                if (HasOtherSelectable(parent, exclude)) return "";
+
                 var cands = new List<Component>();
                 try { cands.AddRange(parent.GetComponentsInChildren<TextMeshProUGUI>(true)); }
                 catch { }
@@ -541,6 +859,17 @@ namespace TransparentHerA11y
             return "";
         }
 
+        /// <summary>别名命中的是不是控件自己（而不是某一级祖先行名）。</summary>
+        private static bool AliasOnSelf(Selectable s)
+        {
+            try
+            {
+                string n = s.gameObject.name;
+                return n != null && NameAlias.ContainsKey(n);
+            }
+            catch { return false; }
+        }
+
         /// <summary>从自己往上（最多 4 层）找第一个命中中文别名表的祖先名。</summary>
         private static string AliasAncestorOf(Selectable s)
         {
@@ -587,13 +916,26 @@ namespace TransparentHerA11y
             string near = RowTextOf(s);
             if (near.Length > 0)
             {
-                if (row.Length > 0 && row != near) return row + "，" + near;
+                if (row.Length > 0 && row != near)
+                {
+                    // 别名命中控件**自己**时（确认框的 Yes/No 这类纯图片按钮），
+                    // 面板上的问题读在前、按钮名读在后：
+                    //   「确定要使用这个姓名吗，确定，按钮」
+                    // 别名来自祖先行名时保持原顺序（「窗口分辨率，1280×720」）。
+                    if (AliasOnSelf(s)) return near + "，" + row;
+                    return row + "，" + near;
+                }
                 return near;
             }
 
             if (row.Length > 0) return row;
 
-            // 最后一层：跳过 Slider / Toggle / ControlButton 这类样板名
+            return AncestorNameOf(s);
+        }
+
+        /// <summary>兜底：从自己往上找第一个不是样板名的对象名。</summary>
+        private static string AncestorNameOf(Selectable s)
+        {
             try
             {
                 Transform t = s.transform;
@@ -605,8 +947,106 @@ namespace TransparentHerA11y
                 }
             }
             catch { }
-
             return s.gameObject.name;
+        }
+
+        // ================= 姓名输入框 =================
+        //
+        // level2（开局输入姓名）的两个输入框在场景里**没有任何标签文字**：
+        // 行名画在图片上，TMP 里读不到；对象名一个叫 FirstText（InputField）、
+        // 另一个叫 Third —— 后者尤其看不出是「名」。
+        //
+        // 唯一可靠的依据是游戏自己的 NameInputManagerTMP（反编译）：
+        //     public TMP_InputField surnameField1;   ← 姓
+        //     public TMP_InputField nameField1;      ← 名
+        // Unity 按声明顺序序列化，解析 level2 的组件字节确认这两个字段
+        // 分别指向场景里 FirstText（InputField）和 Third（恰好就是仅有的
+        // 两个激活输入框，Second / Fourth 未激活）。
+        //
+        // 这里用反射读，读不到就一路回退（占位提示 → 同行标签 → 对象名），
+        // 不让插件因为游戏改版而失效。
+
+        private static Type _nameMgrType;
+        private static bool _nameMgrProbed;
+        private static FieldInfo _surnameField;
+        private static FieldInfo _nameField;
+        private static readonly Dictionary<int, string> _inputRoles = new Dictionary<int, string>();
+
+        private static string InputFieldRoleName(TMP_InputField inf)
+        {
+            try
+            {
+                if (!_nameMgrProbed)
+                {
+                    _nameMgrProbed = true;
+                    _nameMgrType = Type.GetType("NameInputManagerTMP, Assembly-CSharp");
+                    if (_nameMgrType == null)
+                    {
+                        // 游戏程序集名万一不是 Assembly-CSharp，就遍历已加载程序集
+                        Assembly[] all = AppDomain.CurrentDomain.GetAssemblies();
+                        for (int i = 0; i < all.Length && _nameMgrType == null; i++)
+                        {
+                            try { _nameMgrType = all[i].GetType("NameInputManagerTMP", false); }
+                            catch { }
+                        }
+                    }
+                    if (_nameMgrType != null)
+                    {
+                        _surnameField = _nameMgrType.GetField("surnameField1");
+                        _nameField = _nameMgrType.GetField("nameField1");
+                    }
+                }
+                if (_nameMgrType == null || _surnameField == null || _nameField == null) return "";
+
+                int id = inf.GetInstanceID();
+                string cached;
+                if (_inputRoles.TryGetValue(id, out cached)) return cached;
+
+                string role = "";
+                UnityEngine.Object[] found = Resources.FindObjectsOfTypeAll(_nameMgrType);
+                for (int i = 0; i < found.Length && role.Length == 0; i++)
+                {
+                    Component c = found[i] as Component;
+                    if (c == null) continue;
+                    if (ReferenceEquals(_surnameField.GetValue(c), inf)) role = "姓氏";
+                    else if (ReferenceEquals(_nameField.GetValue(c), inf)) role = "名字";
+                }
+                _inputRoles[id] = role;
+                return role;
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>输入框的占位提示文字（TMP 与旧版 Text 都认）。</summary>
+        private static string PlaceholderText(TMP_InputField inf)
+        {
+            try
+            {
+                Graphic g = inf.placeholder;
+                return g != null ? TextOn(g) : "";
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>
+        /// 输入框的标签。**不能**走 TextOf：它的第一层 OwnTextOf 读的是
+        /// 输入框自己子树里的 TMP，那是「已输入的内容」和占位提示，
+        /// 念出来会变成「李，输入框，当前内容 李」这种重复噪声。
+        /// </summary>
+        private static string InputFieldLabel(TMP_InputField inf)
+        {
+            string role = InputFieldRoleName(inf);
+            if (role.Length > 0) return role;
+
+            string ph = PlaceholderText(inf);
+            if (ph.Length > 0) return ph;
+
+            string row = AliasAncestorOf(inf);
+            string near = RowTextOf(inf);
+            if (near.Length > 0) return (row.Length > 0 && row != near) ? row + "，" + near : near;
+            if (row.Length > 0) return row;
+
+            return AncestorNameOf(inf);
         }
 
         /// <summary>滑条当前值的说法。0-1 范围的条按百分比念，否则念 N / M。</summary>
@@ -620,19 +1060,24 @@ namespace TransparentHerA11y
         private static string Describe(Selectable s)
         {
             var sb = new StringBuilder();
-            sb.Append(TextOf(s));
 
             Toggle t = s as Toggle;
             Slider sl = s as Slider;
             TMP_InputField inf = s as TMP_InputField;
 
-            if (t != null) sb.Append("，开关，").Append(t.isOn ? "开" : "关");
-            else if (sl != null) sb.Append("，滑条，").Append(SliderValueText(sl));
-            else if (inf != null)
+            sb.Append(inf != null ? InputFieldLabel(inf) : TextOf(s));
+
+            if (inf != null)
             {
                 sb.Append("，输入框");
-                if (!string.IsNullOrEmpty(inf.text)) sb.Append("，当前内容 ").Append(inf.text);
+                string cur = Norm(inf.text);
+                if (cur.Length > 0) sb.Append("，当前内容 ").Append(cur);
+                else sb.Append("，当前为空");
+                if (inf.characterLimit > 0 && inf.characterLimit <= 8)
+                    sb.Append("，最多 ").Append(inf.characterLimit).Append(" 个字");
             }
+            else if (t != null) sb.Append("，开关，").Append(t.isOn ? "开" : "关");
+            else if (sl != null) sb.Append("，滑条，").Append(SliderValueText(sl));
             else if (s is Button) sb.Append("，按钮");
             else sb.Append("，").Append(s.GetType().Name);
 
@@ -887,6 +1332,24 @@ namespace TransparentHerA11y
             _pendingRescanFrame = Time.frameCount + 1;
         }
 
+        /// <summary>再排一次稍晚的重扫：面板滑入/淡入时，下一帧新控件往往还没激活。</summary>
+        private static void RequestRescanDelayed()
+        {
+            _pendingRescanFrame2 = Time.frameCount + 14;
+        }
+
+        /// <summary>两份控件清单是不是一模一样（顺序也要一样）。</summary>
+        private static bool SameList(List<Selectable> a, List<Selectable> b)
+        {
+            if (a == null || b == null) return false;
+            if (a.Count != b.Count) return false;
+            for (int i = 0; i < a.Count; i++)
+            {
+                if (!ReferenceEquals(a[i], b[i])) return false;
+            }
+            return true;
+        }
+
         private static void Adjust(float dir)
         {
             if (Items.Count == 0) return;
@@ -921,13 +1384,18 @@ namespace TransparentHerA11y
             catch { }
 
             // ---- 激活后的下一帧重扫（唯一允许的自动扫描）----
-            if (_pendingRescanFrame >= 0 && Time.frameCount >= _pendingRescanFrame)
+            bool rescanDue =
+                (_pendingRescanFrame >= 0 && Time.frameCount >= _pendingRescanFrame) ||
+                (_pendingRescanFrame2 >= 0 && Time.frameCount >= _pendingRescanFrame2);
+            if (rescanDue)
             {
-                _pendingRescanFrame = -1;
+                if (_pendingRescanFrame >= 0 && Time.frameCount >= _pendingRescanFrame) _pendingRescanFrame = -1;
+                if (_pendingRescanFrame2 >= 0 && Time.frameCount >= _pendingRescanFrame2) _pendingRescanFrame2 = -1;
                 if (_active)
                 {
                     if (!SceneStable()) { ExitInternal(false); return; }
                     Selectable before = _announcedItem;
+                    var beforeList = new List<Selectable>(Items);
                     Scan();
                     if (Groups.Count == 0 || Items.Count == 0) { ExitInternal(false); return; }
                     _index = Mathf.Clamp(_index, 0, Items.Count - 1);
@@ -936,12 +1404,31 @@ namespace TransparentHerA11y
                     // 别的控件（弹窗、二级菜单、翻页都会这样）。这时必须重新播报，
                     // 否则玩家按下去的是他从没听过的东西 —— 主菜单 START/EXIT 那类
                     // 只差一个单词的按钮，听错一次就出事。
+                    //
+                    // 注意还要比**整份清单**：打开子菜单时，当前这一项往往还是原来
+                    // 那个按钮（序号也没变），但列表里多了新控件。只比当前项的话
+                    // 就一声不吭，玩家以为界面没变。实测就是这样：按了 1/7 没有提示，
+                    // 直到按 Esc 才听见「界面已更新」。
                     Selectable now = CurrentItem();
-                    if (now != before) Announce("界面已更新。");
+                    if (now != before || !SameList(beforeList, Items)) Announce("界面已更新。");
                 }
             }
 
             if (Input.GetKeyDown(KeyCode.Tab)) { Toggle(); return; }
+
+            // 游戏**自己**换面板时（例如姓名输入按回车 →「确定要使用这个姓名吗」
+            // 确认框：promptUI 与 confirmationUI 直接 SetActive 互换）不会通知我们，
+            // 列表会一直停在旧控件上，新面板的按钮就「定位不到」。
+            // 当前项一旦失效就重扫一次；每个失效对象只请求一次，避免反复重扫。
+            if (_active && _pendingRescanFrame < 0)
+            {
+                Selectable cur = CurrentItem();
+                if (cur != null && !cur.isActiveAndEnabled && !ReferenceEquals(cur, _rescanRequestedFor))
+                {
+                    _rescanRequestedFor = cur;
+                    RequestRescanNextFrame();
+                }
+            }
 
             // 全部控件失效时先退出导航，把按键还给游戏
             if (_active && (Groups.Count == 0 || Items.Count == 0)) ExitInternal(false);
@@ -970,6 +1457,13 @@ namespace TransparentHerA11y
                     ClearQuitConfirm();
 
                     Activate(target);
+
+                    // 激活之后界面很可能已经变了（打开子面板、弹出确认框、切页……），
+                    // 而游戏自己换面板**不会**通知我们。所以无条件排两次重扫：
+                    // 下一帧一次，稍晚再一次（面板有动画时用得上）。
+                    // 清单没变就不会播报，多扫一次没有副作用。
+                    RequestRescanNextFrame();
+                    RequestRescanDelayed();
                 }
                 return;
             }

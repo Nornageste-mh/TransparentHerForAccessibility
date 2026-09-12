@@ -13,7 +13,7 @@ using UnityEngine.UI;
 
 namespace TransparentHerA11y
 {
-    [BepInPlugin(Guid, "TransparentHer A11y Reader", "0.5.7")]
+    [BepInPlugin(Guid, "TransparentHer A11y Reader", "0.5.8")]
     public class Plugin : BaseUnityPlugin
     {
         public const string Guid = "transparenther.a11y.reader";
@@ -29,6 +29,9 @@ namespace TransparentHerA11y
         internal static ConfigEntry<float> CfgRealTimeSeconds;
         internal static ConfigEntry<string> CfgSilenceKey;
         internal static ConfigEntry<bool> CfgMenuNav;
+        internal static ConfigEntry<bool> CfgSortByPosition;
+        internal static ConfigEntry<bool> CfgVisibleOnly;
+        internal static ConfigEntry<bool> CfgDiagLog;
         internal static ConfigEntry<bool> CfgQuitConfirm;
         internal static ConfigEntry<string> CfgQuitNames;
         internal static ConfigEntry<string> CfgRepeatKey;
@@ -88,6 +91,18 @@ namespace TransparentHerA11y
                 "回车 / 空格的归属：只有「导航模式下且有选中项」时才是激活控件；\n" +
                 "其余情况（非导航模式、或导航模式下没有可用项）一律归还给游戏，\n" +
                 "也就是照常推进剧情。");
+            CfgSortByPosition = Config.Bind("朗读", "按屏幕位置排序控件", true,
+                "导航时按控件在屏幕上的位置排序（先上后下、同一行先左后右），\n" +
+                "让「第几项」和画面对得上。\n" +
+                "关掉则改回按渲染层级（兄弟节点序号）排序。\n" +
+                "如果发现某些控件定位不到、或者顺序反而更乱，把它关掉对比一下。");
+            CfgVisibleOnly = Config.Bind("朗读", "只导航看得见的控件", true,
+                "只把画面上真正能看到、能点到的控件纳入导航。\n" +
+                "游戏里有不少控件是 active 的，却停在画面外或被面板挡住\n" +
+                "（例如标题场景里整套手机菜单按钮，手机面板本身在屏幕外）。\n" +
+                "关掉的话这些控件会重新出现在导航里 —— 屏幕上是 START/EXIT，\n" +
+                "方向键却在走「读档 / 存档」，按回车还会真的弹确认框。\n" +
+                "只有在发现正常按钮被误排除时才需要关掉。");
             CfgQuitConfirm = Config.Bind("朗读", "退出前二次确认", true,
                 "标题画面有两个美术字按钮，文字分别是 START 和 EXIT，只差一个单词，\n" +
                 "而「哪一个是整块大面板、哪一个是角落小图标」这种视觉信息读屏拿不到，\n" +
@@ -104,6 +119,12 @@ namespace TransparentHerA11y
                 "完整版和试玩版都是这个结果，所以默认值只会命中标题画面那一个 EXIT。\n" +
                 "对不上时日志里会写「[UiNav] 退出确认：「<对象名>」」，照着改这里即可。\n" +
                 "多个名字用逗号分隔；留空则关闭。");
+            CfgDiagLog = Config.Bind("调试", "界面诊断日志", false,
+                "把进入导航模式时扫描到的控件全部写进 LogOutput.log，包括：\n" +
+                "  · 每一组、每一项的朗读文本、屏幕行号与层级路径\n" +
+                "  · 同一场景里「存在但没被纳入导航」的控件，以及被排除的原因\n" +
+                "用于排查「某个控件定位不到」「只念类型不念文字」。\n" +
+                "排查完请关掉，否则日志会变得很大。");
 
             // 挑选语音后端：Tolk > NVDA > SAPI
             try

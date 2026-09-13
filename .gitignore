@@ -33,6 +33,11 @@ verify/
 /mod/nvda_dl/
 /mod/*.zip
 
+# 发布产物（由 mod\tools\makezip.ps1 手工打包）。只进 GitHub Releases，
+# 不进版本库 —— 否则每次发版都会往历史里塞一个近 1 MB 的二进制，
+# 而且 git 没法对 zip 做增量，重打包一次就多存一整份。
+/mod/dist/
+
 # 安装包目录只保留自产的说明文件；BepInEx 运行时、NVDA 客户端 DLL
 # 等第三方二进制由 mod/build.ps1 重新组装。
 #

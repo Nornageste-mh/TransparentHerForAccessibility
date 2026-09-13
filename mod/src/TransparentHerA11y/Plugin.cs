@@ -193,8 +193,41 @@ namespace TransparentHerA11y
     internal static class Reader
     {
         private static readonly List<ChoiceEntry> Choices = new List<ChoiceEntry>();
+
+        /// <summary>0.4 秒内同一句重复触发时的去重哨兵。**不是**重读缓冲区。</summary>
         private static string _lastSpoken = "";
+
+        /// <summary>
+        /// 重读缓冲区 —— 退格键念的就是它。
+        ///
+        /// 关键：**有配音的行也要记进来**。那种行补丁故意不出声（TTS 和角色语音
+        /// 叠在一起两边都听不清），但玩家想听文字时按退格，TTS 就该把这一句念出来。
+        /// 在此之前重读用的和 _lastSpoken 是同一个变量，而有配音的分支把它清成了
+        /// 空串，于是退格在有配音的台词上完全没反应 —— 也就是「语音错过了，退格
+        /// 也翻不回来」。
+        /// </summary>
+        private static string _lastLine = "";
+
         private static float _lastSpeakTime;
+
+        /// <summary>把一段文本记进重读缓冲区。空串不覆盖已有的内容。</summary>
+        private static void Remember(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            _lastLine = text;
+        }
+
+        /// <summary>重读最近朗读过的那一段。有配音的行也在这个范围里。</summary>
+        private static void RepeatLast()
+        {
+            if (string.IsNullOrEmpty(_lastLine))
+            {
+                Speech.Speak("还没有朗读过内容。", true);
+                return;
+            }
+            Speech.Speak(_lastLine, true);
+        }
+
         private static MethodInfo _onReplyClicked;
         private static MethodInfo _onSelectionClicked;
         private static FieldInfo _ending2Index;
@@ -230,6 +263,7 @@ namespace TransparentHerA11y
 
             _lastSpoken = text;
             _lastSpeakTime = Time.realtimeSinceStartup;
+            Remember(text);
             Speech.Speak(text, interrupt);
         }
 
@@ -294,8 +328,13 @@ namespace TransparentHerA11y
                 bool voiced = !string.IsNullOrEmpty(scene.VoiceFilename);
                 if (voiced)
                 {
-                    // 有配音：不朗读，并打断上一句未读完的朗读，避免与语音重叠
+                    // 有配音：不朗读，并打断上一句未读完的朗读，避免与语音重叠。
+                    //
+                    // 但这一行**仍然要记进重读缓冲区** —— 语音错过了、或者玩家没听清，
+                    // 按退格让 TTS 把文本念一遍，正是重读键该干的事。
+                    // （_lastSpoken 照样清空：它只管 0.4 秒去重，不是重读的来源。）
                     Speech.Stop();
+                    Remember(Compose(scene.CharacterName, text));
                     _lastSpoken = "";
                     return;
                 }
@@ -617,9 +656,9 @@ namespace TransparentHerA11y
             }
 
             KeyCode rk = RepeatKeyCode();
-            if (rk != KeyCode.None && Input.GetKeyDown(rk) && !string.IsNullOrEmpty(_lastSpoken))
+            if (rk != KeyCode.None && Input.GetKeyDown(rk))
             {
-                Speech.Speak(_lastSpoken, true);
+                RepeatLast();
             }
 
             // 沉默键：只在这轮限时选择还没结束时有效。

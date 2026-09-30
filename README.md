@@ -245,11 +245,6 @@ ilspycmd -p -o decompiled "<游戏目录>\TransparentHer_Data\Managed\Assembly-C
 
 第三方组件：BepInEx 5.4.23.5（LGPL-2.1）、NVDA Controller Client（LGPL-2.1）—— 详见 [NOTICE.md](NOTICE.md)。
 
----
-
-## 许可
-
-
 简要说明：
 
 - **可自由使用、修改、再分发**（含商用），但须标注出处 —— 本仓库地址与作者

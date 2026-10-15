@@ -141,6 +141,53 @@ Copy-Item $nvdaDll.FullName -Destination $plugDir -Force
 # 同时放一份到包根：Mono 的 DllImport 会先查应用目录
 Copy-Item $nvdaDll.FullName -Destination (Join-Path $pkg "nvdaControllerClient.dll") -Force
 
+# ---- 争渡读屏 API dll：随包带一份**兜底** ----------------------------------
+# 平台层找 dll 的顺序是「注册表登记的安装目录 → 默认安装目录 → 包内这份 → 游戏目录」，
+# 官方也建议直接用安装目录那份（跟着读屏一起升级）。随包带一份是为了那些
+# **找不到这个 dll 的玩家**（它其实就在他们机器的安装目录里）。
+# 两条保障：① 安装目录那份永远优先；② 包内这份若报版本不匹配（InitTTS=1），
+# 平台层会自动换下一份候选 —— 所以带旧了也不会把玩家卡死。
+# 玩家把包里这两个文件删掉即可回到「只读安装目录」。
+function Get-ZdsrInstallDirs {
+    $dirs = @()
+    foreach ($hive in @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall')) {
+        Get-ChildItem $hive -ErrorAction SilentlyContinue | ForEach-Object {
+            $p = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+            if ($p -and $p.DisplayName -and $p.InstallLocation -and
+                ($p.DisplayName -match '争渡' -or $p.DisplayName -match '(?i)zdsr')) {
+                $dirs += ([string]$p.InstallLocation).TrimEnd('\')
+            }
+        }
+    }
+    foreach ($pf in @(${env:ProgramFiles(x86)}, $env:ProgramFiles)) {
+        if ($pf) { $dirs += (Join-Path $pf 'zdsr\zdsr') }
+    }
+    return ($dirs | Select-Object -Unique)
+}
+$zdsrSrc = $null
+foreach ($d in (Get-ZdsrInstallDirs)) {
+    if ((Test-Path (Join-Path $d 'ZDSRAPI_x64.dll')) -or (Test-Path (Join-Path $d 'ZDSRAPI.dll'))) { $zdsrSrc = $d; break }
+}
+if ($zdsrSrc) {
+    $dst = $plugDir
+    New-Item -ItemType Directory -Force -Path $dst | Out-Null
+    foreach ($f in @('ZDSRAPI_x64.dll', 'ZDSRAPI.dll')) {
+        $s = Join-Path $zdsrSrc $f
+        if (Test-Path -LiteralPath $s) {
+            Copy-Item $s -Destination $dst -Force
+            $h = (Get-FileHash $s -Algorithm SHA256).Hash.Substring(0, 16)
+            Write-Host ("    争渡 API 兜底: {0}（{1:N0} 字节, sha256:{2}…）" -f $f, (Get-Item $s).Length, $h)
+        }
+    }
+    Ok "已随包带上争渡 API dll（兜底；平台层仍优先用安装目录那份）"
+} else {
+    Write-Host "    未找到争渡安装目录 —— 包里不带兜底 dll（平台层仍会自动找安装目录）" -ForegroundColor Yellow
+}
+
+
 # 第三方许可证与来源说明（随二进制分发的合规要求）
 $licDir = Join-Path $mod "licenses"
 if (Test-Path -LiteralPath $licDir) {

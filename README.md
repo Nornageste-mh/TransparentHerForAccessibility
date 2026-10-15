@@ -1,7 +1,8 @@
 # TransparentHerForAccessibility
 
 本仓库是**专门针对 Steam 游戏《透明的她与真实的我》（TransparentHer）** 的屏幕阅读器
-辅助模组（游戏内 BepInEx 插件，通过 Tolk / NVDA Controller Client / SAPI 朗读）。
+辅助模组（游戏内 BepInEx 插件，通过 Tolk / NVDA Controller Client /
+争渡读屏（ZDSRAPI）/ SAPI 朗读）。
 
 > ## 🎮 关于本作
 >
@@ -70,6 +71,8 @@
 - 朗读选项，并用数字键 `1`-`9` 选择（游戏原本的选项按钮按屏幕坐标散落摆放，读屏无法定位）
 - 限时选择延长倒计时、并提供「沉默」键
 - 主菜单 / 存读档 / 设置 / 画廊的键盘导航与朗读（游戏原本这些界面几乎只能鼠标点）
+- **语音后端按可用性自动挑**：Tolk → NVDA → **争渡读屏（ZDSR）** → SAPI；
+  运行中可用 `F9`（可改）切到下一个当前可用的后端，选择会记进配置文件
 
 游戏版本：Unity 2022.3.43f1c1，Mono 后端。同时兼容**通过 Steam 购买的正式版**，
 以及官方发布的**独立试玩版**（可直接运行，不需要 Steam）。
@@ -118,12 +121,36 @@
 | `回车` / `空格` | 导航模式下激活控件；否则交给游戏推进剧情 |
 | `Home` / `End` | 第一项 / 最后一项 |
 | `PageUp` / `PageDown` | 切换面板组 |
+| `F9` | **切换语音后端**（自动 → Tolk → NVDA → 争渡 → SAPI → 自动；不可用的档位会跳过） |
+
+> 本作 `F9` 没有被游戏占用，所以默认就是单键。配置项 `切换语音后端按键`
+> 接受任意 `修饰键+主键` 写法（`F9`、`Alt+Shift+F9`、`Ctrl+Alt+F9`），
+> 留空即关闭。
+>
+> **中文 Windows 的输入法 / 输入语言切换默认是 `Alt+Shift`** ——
+> 如果你把这项改成 `Alt+Shift+F9` 又觉得别扭，换成 `Ctrl+Alt+F9`。
+>
+> 修饰键必须完全匹配：配置成单键 `F9` 时，按住 `Alt` 再按 `F9` **不会触发** ——
+> 否则会把别的软件或游戏自己的键抢走。
 
 **游戏原生占用的键**（模组不会去抢，也不要拿来当重读键）：
 `A` 自动模式、`F` 快进、`P` 主菜单、`R` 历史回顾、`Ctrl` 快进、
 `空格`/`回车`/小键盘回车 推进、`Esc` 菜单。
 
 后四个模组自用的键都可以在配置里改或关掉。
+
+> **争渡读屏（ZDSR）这一档不需要额外放文件**：模组按官方建议直接从争渡安装目录
+> 加载 `ZDSRAPI_x64.dll`（32 位进程用 `ZDSRAPI.dll`），搜索顺序是
+> 争渡安装目录 → 插件目录 → 游戏目录，本仓库**不随包分发**争渡的 DLL。
+> 只有 NVDA 那一档需要 `nvdaControllerClient.dll`。
+>
+> 争渡的 API 权限只随**商业版 / 青春版**提供；公益档下
+> `GetSpeakState()` 恒为 `2`（没运行或未授权），此时模组会**如实判不可用**
+> 并继续往下试 SAPI，而不是假装成功。
+>
+> **`v0.5.8a` 曾写过「争渡直连走不通」—— 那句话的依据是 `Speak()` 的返回码，
+> 而它是个坏判据**（未授权时 `Speak()` 照样返回 0）。现在改看
+> `GetSpeakState()` ∈ {3,4}，这一级就接通了。授权限制本身仍然存在，绕不过。
 
 ---
 
@@ -137,7 +164,16 @@
   （那是音频资源本身的长度）
 - 未覆盖所有界面与交互，下列内容还没做：历史回顾面板（`R`）朗读、
   CG / Spine 画面口述、视频口述影像、手机贴纸的内容描述、未配音台词的 TTS 预生成
-- 语音朗读依赖所选后端（Tolk / NVDA / SAPI），中文需要中文语音（系统语音里要有中文嗓音）
+- 语音朗读依赖所选后端（Tolk / NVDA / 争渡 / SAPI），中文需要中文语音
+  （系统语音里要有中文嗓音）；争渡那一档还需要争渡本身带 API 权限
+  （商业版 / 青春版）
+- **争渡这一档尚未在本作里实机验证**：平台层的验证（含宿主集成测试）与那次
+  《钟塔》实机切换记录见 `CHANGELOG.md` 的 `v0.5.10.0` 一节；
+  本作自己的两条差异（默认键为单键 `F9`、本作占用键不受影响）**还没有实机确认**
+- **玩家在游戏里听到的到底是不是争渡自己的声音，没有验证过**：
+  读屏自己也会出声，旁观者无法从音频上区分
+- 点显器（盲文）输出**尚未接入**：`Zdsr.cs` 里有接口，但没接到朗读通路上，
+  开发机上没有点显器可验证
 
 ---
 
@@ -164,8 +200,10 @@ cd mod
 │  ├─ build.ps1                 下依赖 → 编译 → 组包
 │  ├─ src/TransparentHerA11y/
 │  │  ├─ Plugin.cs              补丁与朗读逻辑
-│  │  ├─ Speech.cs              Tolk / NVDA / SAPI 后端调度
+│  │  ├─ Hotkey.cs              按键描述解析（`Alt+Shift+F9` 这类修饰键组合）
+│  │  ├─ Speech.cs              Tolk / NVDA / 争渡 / SAPI 后端调度，含运行中切换
 │  │  ├─ Nvda.cs                NVDA Controller Client 封装
+│  │  ├─ Zdsr.cs                争渡读屏 ZDSRAPI 封装（运行时加载 + 可用性判据）
 │  │  ├─ Sapi.cs                Windows 内置语音（纯 P/Invoke 直调 ISpVoice）
 │  │  └─ UiNav.cs               界面键盘导航与朗读
 │  └─ package/                  安装包（直接拷进游戏根目录）
@@ -206,6 +244,12 @@ cd mod
   `\b(exit|quit)\b` 两头都会错。直接拿实查到的对象名全等比较。
 - **`Enum.TryParse("0")` 会成功但得到 `KeyCode.None`**（数值 0），不是 `Alpha0`。
   按键配置项要先自己映射单个数字。
+- **判断争渡（ZDSR）能不能用，看 `GetSpeakState()` ∈ {3,4}，不要看 `Speak()` 的返回值**：
+  未授权或读屏没运行时 `Speak()` 照样返回 `0`。拿它当判据会得到
+  「配置选了争渡、日志一片绿、耳朵一片安静」，而且无从排查 ——
+  `v0.5.8a` 那句「争渡走不通」就是这么来的。
+- **写「可切换」的功能键要用 `Hotkey.cs` 的解析器**，别只 `Enum.TryParse<KeyCode>`：
+  后者表达不了 `Alt+Shift+F9`，而这正是与别的软件（含输入法）冲突时需要的写法。
 - **别用 PowerShell 的文本 cmdlet 改源码**：`Get-Content -Raw` 在
   Windows PowerShell 5.1 下按 ANSI 代码页读取无 BOM 的 UTF-8，中文会变乱码。
 
@@ -243,7 +287,13 @@ ilspycmd -p -o decompiled "<游戏目录>\TransparentHer_Data\Managed\Assembly-C
 
 补丁代码与文档采用 [MIT 许可](LICENSE) 发布，附加的署名要求与免责条款见 [NOTICE.md](NOTICE.md)。
 
-第三方组件：BepInEx 5.4.23.5（LGPL-2.1）、NVDA Controller Client（LGPL-2.1）—— 详见 [NOTICE.md](NOTICE.md)。
+第三方组件：BepInEx 5.4.23.5 与 HarmonyX / Mono.Cecil / MonoMod（**MIT**）、
+UnityDoorstop（`winhttp.dll`）与 NVDA Controller Client（**LGPL-2.1**）—— 详见 [NOTICE.md](NOTICE.md)。
+
+> 这一行原来写的是「BepInEx 5.4.23.5（LGPL-2.1）」—— **是错的**。
+> 本仓库 `CHANGELOG.md` 里早就纠过一次：**BepInEx 5 是 MIT，BepInEx 6 才是
+> LGPL-2.1**；`mod\package\安装说明.txt` 与 `mod\licenses\THIRD-PARTY-NOTICES.txt`
+> 写的也都是 MIT。只有 README 这一行漏改了，这次一并改掉。
 
 简要说明：
 

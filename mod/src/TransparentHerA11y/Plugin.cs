@@ -13,7 +13,7 @@ using UnityEngine.UI;
 
 namespace TransparentHerA11y
 {
-    [BepInPlugin(Guid, "TransparentHer A11y Reader", "0.5.9.0")]
+    [BepInPlugin(Guid, "TransparentHer A11y Reader", "0.5.10.0")]
     public class Plugin : BaseUnityPlugin
     {
         public const string Guid = "transparenther.a11y.reader";
@@ -35,6 +35,9 @@ namespace TransparentHerA11y
         internal static ConfigEntry<bool> CfgQuitConfirm;
         internal static ConfigEntry<string> CfgQuitNames;
         internal static ConfigEntry<string> CfgRepeatKey;
+
+        /// <summary>运行中切换语音后端的按键（支持 Alt+Shift+F9 这类写法）。</summary>
+        internal static ConfigEntry<string> CfgBackendKey;
         internal static ConfigEntry<string> CfgSpeechBackend;
 
         private Harmony _harmony;
@@ -54,8 +57,8 @@ namespace TransparentHerA11y
             CfgReadPhoneSticker = Config.Bind("朗读", "朗读手机表情", true,
                 "手机聊天里的表情/图片消息提示为「图片」。");
             CfgSpeechBackend = Config.Bind("朗读", "语音后端", "自动",
-                "用哪个后端朗读。默认「自动」按 Tolk → NVDA → SAPI 的顺序挑第一个可用的。\n" +
-                "可以填：自动 / Tolk / NVDA / SAPI。\n" +
+                "用哪个后端朗读。默认「自动」按 Tolk → NVDA → 争渡 → SAPI 的顺序挑第一个可用的。\n" +
+                "可以填：自动 / Tolk / NVDA / 争渡 / SAPI。\n" +
                 "钉死某一个主要用来排查问题（例如填 SAPI 就能确认系统语音这条路通不通）；\n" +
                 "钉死的后端不可用时**不会**回退到别的后端，而是彻底不出声。");
             CfgReadChoices = Config.Bind("朗读", "朗读选项", true,
@@ -82,6 +85,12 @@ namespace TransparentHerA11y
             // 注意：游戏原生占用了以下按键，不要选它们
             //   A=自动  F=快进  P=打开主菜单  R=打开历史回顾/语音收藏
             //   Ctrl=快进  空格/回车/小键盘回车=推进  Esc=菜单
+            CfgBackendKey = Config.Bind("朗读", "切换语音后端按键", "F9",
+                "运行中切换语音后端的按键。可写修饰键组合，例如 F9、Alt+Shift+F9、Ctrl+Alt+F9。\n" +
+                "按一下切到下一个「当前可用」的后端（自动 → Tolk → NVDA → 争渡 → SAPI → 自动），\n" +
+                "当前不可用的会被跳过并在播报里说明；选择会写进本配置文件，下次启动仍生效。\n" +
+                "留空则关闭这个功能键。");
+
             CfgRepeatKey = Config.Bind("朗读", "重读按键", "Backspace",
                 "重新朗读当前这一句的按键。填 KeyCode 名称，例如 Backspace、Tab、Q、F1、Home。\n" +
                 "留空则关闭这个功能。\n" +
@@ -660,6 +669,10 @@ namespace TransparentHerA11y
             {
                 RepeatLast();
             }
+
+            // 运行中切换语音后端（默认 F9。游戏若占用 F9，把配置改成 Alt+Shift+F9）
+            if (Hotkey.Down(Plugin.CfgBackendKey != null ? Plugin.CfgBackendKey.Value : ""))
+                Say(Speech.CycleAvailable(), true);
 
             // 沉默键：只在这轮限时选择还没结束时有效。
             // 主键盘和小键盘都认（_silenceKeyAlt 是同一个小键盘键）。

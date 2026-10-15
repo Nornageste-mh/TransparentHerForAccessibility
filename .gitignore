@@ -31,6 +31,7 @@ verify/
 # ------------------------------------------------------------
 /mod/bep_dl/
 /mod/nvda_dl/
+/mod/dl/
 /mod/*.zip
 
 # 发布产物（由 mod\tools\makezip.ps1 手工打包）。只进 GitHub Releases，

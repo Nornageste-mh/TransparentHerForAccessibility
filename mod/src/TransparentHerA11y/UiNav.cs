@@ -290,8 +290,13 @@ namespace TransparentHerA11y
                     }
                 }
 
-                // 只留下**真的在画面上**的控件。这一步必须在排序之前做：
+                // 只留下**真的能选到**的控件。这一步必须在排序之前做：
                 // 画面外/被挡住的控件不但念了没用，还会把编号撑大（「1 / 13」）。
+                //
+                // 但「在视口外」和「选不到」不是一回事：折跃界面的章节节点全在
+                // 一个 ScrollRect 的内容里，蓝图比视口宽三倍，屏幕外的节点
+                // 只要滚过去就能选。所以这里多给一条出路：位于**看得见的
+                // 滚动容器**内容里的控件也保留，焦点落到它身上时再滚动。
                 if (Plugin.CfgVisibleOnly == null || Plugin.CfgVisibleOnly.Value)
                 {
                     for (int i = 0; i < Groups.Count; i++)
@@ -302,13 +307,14 @@ namespace TransparentHerA11y
                             g.Items.RemoveAll(s =>
                             {
                                 bool ok = VisiblyClickable(s, g);
+                                if (!ok) ok = ScrollReachable(s, g);
                                 if (!ok && excluded.Count < 60) excluded.Add("[画面外或点不到] " + PathOf(s.transform));
                                 return !ok;
                             });
                         }
                         else
                         {
-                            g.Items.RemoveAll(s => !VisiblyClickable(s, g));
+                            g.Items.RemoveAll(s => !VisiblyClickable(s, g) && !ScrollReachable(s, g));
                         }
                     }
                 }
@@ -520,16 +526,30 @@ namespace TransparentHerA11y
             {
                 RectTransform rt = s.transform as RectTransform;
                 if (rt == null) return true;
+                return RectOnScreen(rt, g) && RaycastHitsSubtree(rt, g);
+            }
+            catch { return true; }
+        }
 
-                // 1) 和 Canvas 矩形完全不相交 = 画面外
-                if (g.HasCanvasRect)
-                {
-                    Rect r = WorldRect(rt);
-                    if (r.xMax < g.CanvasRect.xMin - 2f || r.xMin > g.CanvasRect.xMax + 2f) return false;
-                    if (r.yMax < g.CanvasRect.yMin - 2f || r.yMin > g.CanvasRect.yMax + 2f) return false;
-                }
+        /// <summary>控件矩形是否和 Canvas 矩形相交（完全在外 = 画面外）。</summary>
+        private static bool RectOnScreen(RectTransform rt, Group g)
+        {
+            try
+            {
+                if (!g.HasCanvasRect) return true;
+                Rect r = WorldRect(rt);
+                if (r.xMax < g.CanvasRect.xMin - 2f || r.xMin > g.CanvasRect.xMax + 2f) return false;
+                if (r.yMax < g.CanvasRect.yMin - 2f || r.yMin > g.CanvasRect.yMax + 2f) return false;
+                return true;
+            }
+            catch { return true; }
+        }
 
-                // 2) 从中心打一条 UI 射线，看能不能打到自己
+        /// <summary>从控件中心打一条 UI 射线，看能不能打到它（或它的子物体）。</summary>
+        private static bool RaycastHitsSubtree(RectTransform rt, Group g)
+        {
+            try
+            {
                 EventSystem es = EventSystem.current;
                 if (es == null) return true;
 
@@ -546,11 +566,212 @@ namespace TransparentHerA11y
                     if (hit == null) continue;
                     // 只认「打到自己或自己的子物体」。**不能**认祖先：
                     // 整屏背景通常就是所有控件的共同祖先，认了它等于这道判断失效。
-                    if (hit == s.gameObject || hit.transform.IsChildOf(s.transform)) return true;
+                    if (hit == rt.gameObject || hit.transform.IsChildOf(rt)) return true;
                 }
                 return false;
             }
             catch { return true; }
+        }
+
+        // ================= 滚动容器里的控件 =================
+        //
+        // 「折跃」界面的全部章节节点排在一张 12238×2160 的蓝图里，外面套着
+        // Canvas/Panel/JumpBluePrint/Scroll View
+        // （ScrollRect：horizontal=true、vertical=false、movementType=Clamped，
+        //   viewport 3840×2160，content 12238×2160）。
+        // 蓝图比视口宽三倍多，一屏只放得下十几个节点，其余全在视口外；
+        // 而 VisiblyClickable 的判据是「此刻看得见」，于是它们被整批排除出
+        // 导航清单，键盘/读屏用户根本走不到 —— 这就是「大部分章节选不到」。
+        //
+        // 修法分两半：
+        //   1) 扫描时：只要控件位于**看得见的** ScrollRect 内容里就保留它
+        //      （面板藏起来时 ScrollRect 自己过不了可见性判定，不会混进来）；
+        //   2) 播报时：焦点落到控件身上，就把它的 ScrollRect 滚到它面前。
+        // 于是「看不到」不再等于「选不到」。
+        //
+        // 用轴心法（CalculateRelativeRectTransformBounds）而不直接改
+        // content.anchoredPosition：前者和 Unity ScrollRect 自己换算
+        // normalizedPosition 用的是同一套局部坐标，不受 Canvas 缩放影响。
+
+        /// <summary>控件所在的、能滚到它面前的 ScrollRect；不在滚动内容里则返回 null。</summary>
+        private static ScrollRect ScrollAncestorOf(Transform t, out RectTransform viewport)
+        {
+            viewport = null;
+            try
+            {
+                Transform cur = t;
+                for (int up = 0; up < 12 && cur != null; up++)
+                {
+                    ScrollRect sr = cur.GetComponent<ScrollRect>();
+                    if (sr != null && sr.content != null
+                        && (t == sr.content || t.IsChildOf(sr.content)))
+                    {
+                        RectTransform vp = sr.viewport != null
+                            ? sr.viewport
+                            : sr.transform as RectTransform;
+                        if (vp != null)
+                        {
+                            viewport = vp;
+                            return sr;
+                        }
+                    }
+                    cur = cur.parent;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>控件此刻在视口外，但所在的滚动面板可见、可以滚过去。</summary>
+        private static bool ScrollReachable(Selectable s, Group g)
+        {
+            try
+            {
+                RectTransform item = s.transform as RectTransform;
+                if (item == null) return false;
+                RectTransform vp;
+                ScrollRect sr = ScrollAncestorOf(item, out vp);
+                if (sr == null || vp == null) return false;
+                if (!sr.isActiveAndEnabled) return false;
+                if (!RectOnScreen(vp, g) || !RaycastHitsSubtree(vp, g)) return false;
+
+                // 屏外可以靠滚动看得到，但「整条链 alpha = 0」的控件是游戏自己藏起来的
+                // （折跃里未解锁的章节就是 canvasGroup.alpha = 0），念出来等于剧透未解锁内容。
+                if (FullyTransparent(s)) return false;
+                return true;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>控件整条祖先链的 CanvasGroup alpha 乘积是否为 0（游戏用它把未解锁节点藏起来）。</summary>
+        private static bool FullyTransparent(Selectable s)
+        {
+            try
+            {
+                float a = 1f;
+                Transform cur = s.transform;
+                for (int up = 0; up < 12 && cur != null; up++)
+                {
+                    CanvasGroup cg = cur.GetComponent<CanvasGroup>();
+                    if (cg != null) a *= cg.alpha;
+                    cur = cur.parent;
+                }
+                return a <= 0.01f;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>把控件滚进它所在的 ScrollRect 视口（由内到外逐层处理嵌套滚动）。</summary>
+        private static void RevealInScroll(Selectable s)
+        {
+            try
+            {
+                RectTransform item = s != null ? s.transform as RectTransform : null;
+                if (item == null) return;
+                Transform cur = item;
+                for (int up = 0; up < 12 && cur != null; up++)
+                {
+                    ScrollRect sr = cur.GetComponent<ScrollRect>();
+                    if (sr != null && sr.content != null
+                        && (item == sr.content || item.IsChildOf(sr.content)))
+                    {
+                        RectTransform vp = sr.viewport != null
+                            ? sr.viewport
+                            : sr.transform as RectTransform;
+                        if (vp != null) RevealOne(sr, item, vp);
+                    }
+                    cur = cur.parent;
+                }
+            }
+            catch { }
+        }
+
+        private static void RevealOne(ScrollRect sr, RectTransform item, RectTransform viewport)
+        {
+            try
+            {
+                if (!sr.isActiveAndEnabled) return;
+                Canvas.ForceUpdateCanvases();
+
+                Rect vr = viewport.rect;
+                Bounds cb = RectTransformUtility.CalculateRelativeRectTransformBounds(viewport, sr.content);
+                Bounds ib = RectTransformUtility.CalculateRelativeRectTransformBounds(viewport, item);
+
+                if (sr.horizontal) RevealAxis(sr, true, vr, cb, ib);
+                if (sr.vertical) RevealAxis(sr, false, vr, cb, ib);
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// 单轴滚动：能整个放下就居中，放不下就贴到最近的那条边。
+        /// Unity 的定义是 value = (viewMin - contentMin) / (contentSize - viewSize)，
+        /// 两轴同一条公式（vertical 也是 0=贴底、1=贴顶），
+        /// 所以「内容沿本轴平移 shift 个局部单位」等价于 value -= shift / hidden。
+        /// </summary>
+        private static void RevealAxis(ScrollRect sr, bool horizontal, Rect vr, Bounds cb, Bounds ib)
+        {
+            float hidden = (horizontal ? cb.size.x : cb.size.y)
+                         - (horizontal ? vr.width : vr.height);
+            if (hidden <= 1f) return;   // 这个轴本来就不用滚
+
+            float viewMin = horizontal ? vr.xMin : vr.yMin;
+            float viewMax = horizontal ? vr.xMax : vr.yMax;
+            float viewCenter = horizontal ? vr.center.x : vr.center.y;
+            float itemMin = horizontal ? ib.min.x : ib.min.y;
+            float itemMax = horizontal ? ib.max.x : ib.max.y;
+            float itemCenter = horizontal ? ib.center.x : ib.center.y;
+            float itemSize = itemMax - itemMin;
+
+            float shift;
+            if (itemSize <= viewMax - viewMin)
+                shift = viewCenter - itemCenter;        // 放得下：居中
+            else if (itemMin < viewMin)
+                shift = viewMin - itemMin;              // 太大：先露出左/下边
+            else if (itemMax > viewMax)
+                shift = viewMax - itemMax;
+            else
+                return;                                 // 已经在视口里
+
+            if (Mathf.Abs(shift) < 0.5f) return;
+
+            float cur = horizontal ? sr.horizontalNormalizedPosition : sr.verticalNormalizedPosition;
+            float next = Mathf.Clamp01(cur - shift / hidden);
+            if (Mathf.Abs(next - cur) < 0.0001f) return;
+            if (horizontal) sr.horizontalNormalizedPosition = next;
+            else sr.verticalNormalizedPosition = next;
+        }
+
+        /// <summary>当前项是否在「横向可滚」的列表里（左/右键用它来换项而不是调滑条）。</summary>
+        private static bool CurrentInHorizontalList()
+        {
+            try
+            {
+                Selectable s = CurrentItem();
+                if (s == null || s is Slider) return false;
+                RectTransform item = s.transform as RectTransform;
+                if (item == null) return false;
+
+                Transform cur = item;
+                for (int up = 0; up < 12 && cur != null; up++)
+                {
+                    ScrollRect sr = cur.GetComponent<ScrollRect>();
+                    if (sr != null && sr.content != null
+                        && (item == sr.content || item.IsChildOf(sr.content)))
+                    {
+                        RectTransform vp = sr.viewport != null
+                            ? sr.viewport
+                            : sr.transform as RectTransform;
+                        if (vp == null) return false;
+                        if (!sr.isActiveAndEnabled || !sr.horizontal) return false;
+                        Bounds cb = RectTransformUtility.CalculateRelativeRectTransformBounds(vp, sr.content);
+                        return cb.size.x > vp.rect.width + 1f;
+                    }
+                    cur = cur.parent;
+                }
+            }
+            catch { }
+            return false;
         }
 
         // ================= 诊断（配置「界面诊断日志」打开时才输出）=================
@@ -1201,6 +1422,10 @@ namespace TransparentHerA11y
             _announcedItem = s;
             SelectByUs(s.gameObject);
 
+            // 折跃蓝图这类「一屏放不下」的面板：焦点走到屏幕外的项时，
+            // 必须把滚动容器滚过去，否则读屏说有这一项、画面却没动。
+            RevealInScroll(s);
+
             // 光标移到别处 = 放弃刚才那次退出确认
             ClearQuitConfirm();
 
@@ -1579,8 +1804,21 @@ namespace TransparentHerA11y
             }
             else if (Input.GetKeyDown(KeyCode.PageDown)) SwitchGroup(1);
             else if (Input.GetKeyDown(KeyCode.PageUp)) SwitchGroup(-1);
-            else if (Input.GetKeyDown(KeyCode.LeftArrow)) Adjust(-1f);
-            else if (Input.GetKeyDown(KeyCode.RightArrow)) Adjust(1f);
+
+            // 左右键有两种含义：滑条上是「调值」（Adjust）；
+            // 在**横向滚动**的列表里（折跃蓝图就是）是「换项」——
+            // 用户的直觉是「左右移动画面」，这里让左右键兼做前后一项，
+            // 焦点一变画面就跟着滚，正好对上。
+            else if (Input.GetKeyDown(KeyCode.LeftArrow))
+            {
+                if (CurrentInHorizontalList()) { _index = (_index - 1 + Items.Count) % Items.Count; Announce(null); }
+                else Adjust(-1f);
+            }
+            else if (Input.GetKeyDown(KeyCode.RightArrow))
+            {
+                if (CurrentInHorizontalList()) { _index = (_index + 1) % Items.Count; Announce(null); }
+                else Adjust(1f);
+            }
             else if (Input.GetKeyDown(KeyCode.Home)) { _index = 0; Announce(null); }
             else if (Input.GetKeyDown(KeyCode.End)) { _index = Items.Count - 1; Announce(null); }
         }

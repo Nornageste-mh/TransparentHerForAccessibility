@@ -1202,6 +1202,21 @@ namespace TransparentHerA11y
         // 这里用反射读，和姓名输入框（InputFieldRoleName）同样的容错策略：
         // 类型 / 字段任何一步拿不到就返回空串，TextOf 原样回退到原来的对象名，
         // 不会因为游戏改版把别的界面带坏。
+        //
+        // ── 周目 ──
+        // 界面上「第一周目 / 第二周目 / …」是画在折跃图那整张背景图里的，
+        // 场景里没有对应的文字对象（把 level3 整个文件按 UTF-8 搜「周目」，
+        // 只命中一个节点自己的标题），NodeData 里也没有周目字段。
+        // 而且「一周目一行」并不成立：实机截图核对下来，图的中段几个周目会
+        // 在两三条水平线上蛇形排开（避开章节标题字幕互相压住），所以按 y 聚行
+        // 数出来的周目是错的。
+        //
+        // 真正可靠的依据是游戏自己的排布顺序：同一父节点下折跃节点的兄弟顺序
+        // 就是剧情顺序，而每一周目开头的章节标题都重新从「序章 / 伪序章」起头
+        // （level3 反序列化里 nodeID 1 和 19 都叫「序章」，40 是「伪序章」，
+        // 50 的标题自己就带着「第 X 周目」）。所以数一数自己前面出现过几次
+        // 序章，就是第几周目；标题自己写了「第 X 周目」的以它为准。
+        // 判断不出来（结构变了、顺序对不上）就返回 0，不念周目，绝不瞎猜。
         private static Type _nodePrefabType;
         private static bool _nodeProbed;
         private static FieldInfo _nodeDataField;
@@ -1259,13 +1274,118 @@ namespace TransparentHerA11y
                     {
                         object data = _nodeDataField.GetValue(comp);
                         if (data == null) return "";
-                        return Norm(_nodeDescField.GetValue(data) as string);
+                        string title = Norm(_nodeDescField.GetValue(data) as string);
+                        if (title.Length == 0) return "";
+
+                        // 标题自己带「周目」的那几个原样念，
+                        // 免得周目被念成两遍（「第 X 周目，第 X 周目  …」）。
+                        if (title.IndexOf("周目", StringComparison.Ordinal) >= 0)
+                            return title;
+
+                        int week = JumpNodeWeekOf(comp);
+                        if (week <= 0) return title;
+                        return "第" + WeekNum(week) + "周目，" + title;
                     }
                     t = t.parent;
                 }
             }
             catch { }
             return "";
+        }
+
+        /// <summary>
+        /// 折跃节点属于第几周目（从 1 起）；判断不出来返回 0，调用方就不念周目。
+        /// 依据：折跃节点的兄弟顺序就是剧情顺序，每个周目都重新从「序章 / 伪序章」起头。
+        /// </summary>
+        private static int JumpNodeWeekOf(Component node)
+        {
+            try
+            {
+                Transform parent = node.transform.parent;
+                if (parent == null) return 0;
+
+                int week = 1;
+                int seen = 0;
+                bool foundSelf = false;
+                for (int i = 0; i < parent.childCount; i++)
+                {
+                    Transform child = parent.GetChild(i);
+                    if (child == null) continue;
+                    Component np = child.GetComponent(_nodePrefabType);
+                    if (np == null) continue;
+
+                    string title = NodeDescriptionOf(np);
+                    if (title.Length == 0) continue;
+
+                    int labeled = WeekInTitle(title);
+                    if (labeled > 0) week = labeled;              // 标题自己写了第几周目
+                    else if (seen > 0 && StartsWeek(title)) week++;   // 新周目又从头「序章」起
+
+                    seen++;
+                    if (np == node) { foundSelf = true; break; }
+                }
+
+                if (!foundSelf) return 0;
+                return (week >= 1 && week <= 12) ? week : 0;      // 周目数不可能太多
+            }
+            catch { return 0; }
+        }
+
+        /// <summary>取 NodePrefab.data.description（已规整）；拿不到返回空串。</summary>
+        private static string NodeDescriptionOf(Component np)
+        {
+            try
+            {
+                object data = _nodeDataField.GetValue(np);
+                if (data == null) return "";
+                return Norm(_nodeDescField.GetValue(data) as string);
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>这一章是不是某个周目的开头：「序章」「伪序章」。</summary>
+        private static bool StartsWeek(string title)
+        {
+            return title.StartsWith("序章", StringComparison.Ordinal)
+                || title.StartsWith("伪序章", StringComparison.Ordinal);
+        }
+
+        /// <summary>标题里自带「第 X 周目」时返回 X，否则 0。</summary>
+        private static int WeekInTitle(string title)
+        {
+            int idx = title.IndexOf("周目", StringComparison.Ordinal);
+            if (idx <= 1 || title[0] != '第') return 0;
+            string num = title.Substring(1, idx - 1).Trim();
+            if (num.Length == 0) return 0;
+
+            int parsed;
+            if (int.TryParse(num, out parsed))
+                return (parsed >= 1 && parsed <= 12) ? parsed : 0;
+            return CnNumber(num);
+        }
+
+        /// <summary>「一」…「十二」这类中文数字；认不出返回 0。</summary>
+        private static int CnNumber(string s)
+        {
+            const string cn = "零一二三四五六七八九十";
+            if (s.Length == 1)
+            {
+                int v = cn.IndexOf(s[0]);
+                return (v >= 1 && v <= 10) ? v : 0;
+            }
+            if (s.Length == 2 && s[0] == '十')
+            {
+                int v = cn.IndexOf(s[1]);
+                return (v >= 1 && v <= 9) ? 10 + v : 0;
+            }
+            return 0;
+        }
+
+        private static string WeekNum(int n)
+        {
+            string[] cn = { "零", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十" };
+            if (n >= 0 && n < cn.Length) return cn[n];
+            return n.ToString();
         }
 
         // ================= 姓名输入框 =================

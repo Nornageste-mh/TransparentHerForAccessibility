@@ -912,6 +912,12 @@ namespace TransparentHerA11y
             string own = OwnTextOf(s);
             if (own.Length > 0) return own;
 
+            // 折跃（JumpBP）界面的节点：控件是一张画在图片上的节点图标，
+            // 子树里一个字都没有，游戏界面也从不显示节点标题 —— 标题只存在
+            // 于 NodeData.description（见下面的 JumpNodeTitleOf）。
+            string nodeTitle = JumpNodeTitleOf(s);
+            if (nodeTitle.Length > 0) return nodeTitle;
+
             string row = AliasAncestorOf(s);
             string near = RowTextOf(s);
             if (near.Length > 0)
@@ -948,6 +954,97 @@ namespace TransparentHerA11y
             }
             catch { }
             return s.gameObject.name;
+        }
+
+        // ================= 折跃节点（JumpBP） =================
+        //
+        // 防剧透：下面的示例标题一律写成 Base64（UTF-8），源码里没有任何标题常量，
+        // 标题全部来自运行期的 NodeData.description。解码：
+        //   [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(…))
+        //
+        // 「折跃」界面里的每个节点是一个 JumpPrefab 变体，节点本身**没有文字**：
+        //   子树里只有图片（图标 readSprite / unreadSprite、光晕、连线）
+        //   和 Button / CanvasGroup / NodePrefab 三个组件。
+        // 所以 TextOf 以前一路回退到 AncestorNameOf，念出来是
+        //   「JumpPrefab (12)，按钮，13 / 49」
+        // 而玩家需要的是这一章的标题。游戏自己的界面从不显示标题，但它**在数据里有**：
+        //
+        //   NodeData（[Serializable]，内联在 NodePrefab.data 里）
+        //     nodeID       "12"
+        //     description  "56ys5Y2B56ugICDmsonmsqY="   ← 就是标题（Base64）
+        //     chapterLine  "66,0"
+        // 依据来自直接反序列化游戏的 level3 / level5（Dialog / Dialog2 场景）：
+        // 50 个 JumpPrefab 上的 NodePrefab 组件，nodeID 1..50 的 description
+        // 依次是「5bqP56ugICBDR++8geaIkeeci+WIsOS6hkNH77yB」…「56ys5Zub5ZGo55uuICDlhbHpgJrnur8y」，50 个全都有值，
+        // 且没有任何一处被清空（其中有「56ysIO+8n++8n+eroCAg5rKh5pyJ5pyq5p2l55qE5pyq5p2l4oCm」这种故意留白的标题）。
+        //
+        // 这里用反射读，和姓名输入框（InputFieldRoleName）同样的容错策略：
+        // 类型 / 字段任何一步拿不到就返回空串，TextOf 原样回退到原来的对象名，
+        // 不会因为游戏改版把别的界面带坏。
+        private static Type _nodePrefabType;
+        private static bool _nodeProbed;
+        private static FieldInfo _nodeDataField;
+        private static FieldInfo _nodeDescField;
+
+        /// <summary>按名字找游戏程序集里的类型（程序集名不一定是 Assembly-CSharp）。</summary>
+        private static Type FindGameType(string name)
+        {
+            try
+            {
+                Type t = Type.GetType(name + ", Assembly-CSharp");
+                if (t != null) return t;
+                Assembly[] all = AppDomain.CurrentDomain.GetAssemblies();
+                for (int i = 0; i < all.Length; i++)
+                {
+                    try { t = all[i].GetType(name, false); }
+                    catch { }
+                    if (t != null) return t;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>折跃节点的标题（NodeData.description）。不是折跃节点则返回空串。</summary>
+        private static string JumpNodeTitleOf(Selectable s)
+        {
+            try
+            {
+                if (!_nodeProbed)
+                {
+                    _nodeProbed = true;
+                    _nodePrefabType = FindGameType("NodePrefab");
+                    if (_nodePrefabType != null)
+                    {
+                        _nodeDataField = _nodePrefabType.GetField("data");
+                        if (_nodeDataField != null)
+                            _nodeDescField = _nodeDataField.FieldType.GetField("description");
+                    }
+                    if (_nodeDataField == null || _nodeDescField == null)
+                    {
+                        _nodePrefabType = null;   // 结构对不上，彻底放弃
+                        return "";
+                    }
+                }
+                if (_nodePrefabType == null) return "";
+
+                // NodePrefab 挂在节点根上，Button 也在同一个 GameObject；
+                // 为稳妥起见往上再看两层（按钮若被挪到子物体也还能认出来）。
+                Transform t = s.transform;
+                for (int up = 0; up < 3 && t != null; up++)
+                {
+                    Component comp = t.GetComponent(_nodePrefabType);
+                    if (comp != null)
+                    {
+                        object data = _nodeDataField.GetValue(comp);
+                        if (data == null) return "";
+                        return Norm(_nodeDescField.GetValue(data) as string);
+                    }
+                    t = t.parent;
+                }
+            }
+            catch { }
+            return "";
         }
 
         // ================= 姓名输入框 =================

@@ -37,8 +37,100 @@
 | **`v0.5.8a`** | — | **0.5.8a** | 见 `v0.5.8a` 标签 | **修复系统语音（SAPI）兜底从未出声**：Mono 没实现 COM 后期绑定，改为纯 P/Invoke 直调 `ISpVoice`。新增「语音后端」配置项 |
 | **`v0.5.9.0`** | — | **0.5.9.0** | 见 `v0.5.9.0` 标签 | **修复有配音的台词按退格重读不出声**：重读缓冲区与 0.4 秒去重哨兵原来共用一个变量 |
 | **`v0.5.10.0`** | — | **0.5.10.0** | `3b51868` | **新增争渡读屏（ZDSR）语音后端**（链变为 Tolk → NVDA → 争渡 → SAPI）；新增「切换语音后端按键」（本作默认 `F9`）；`Sapi.cs` 的日志调用改为空安全 |
-| **`v0.5.10.1`** | — | **0.5.10.1** | 尚未提交 | **自动找到争渡的安装目录**（读注册表卸载登记项，覆盖装在别的盘 / 自定义目录的情况）；候选顺序改为「注册表安装目录 → 默认安装目录 → 插件目录 → 游戏目录」；**某一份 dll 报版本不匹配时自动换下一份**；发布包的 `BepInEx\plugins\` 里**带一份兜底 dll**（`ZDSRAPI_x64.dll` + `ZDSRAPI.dll`，可删）；`A11Y_ZDSR_DIR` 改为接受 `;` 分隔的多个目录；平台层对齐 A11yFramework **0.2.1.0** |
+| **`v0.5.10.1`** | — | **0.5.10.1** | `a859247` | **自动找到争渡的安装目录**（读注册表卸载登记项，覆盖装在别的盘 / 自定义目录的情况）；候选顺序改为「注册表安装目录 → 默认安装目录 → 插件目录 → 游戏目录」；**某一份 dll 报版本不匹配时自动换下一份**；发布包的 `BepInEx\plugins\` 里**带一份兜底 dll**（`ZDSRAPI_x64.dll` + `ZDSRAPI.dll`，可删）；`A11Y_ZDSR_DIR` 改为接受 `;` 分隔的多个目录；平台层对齐 A11yFramework **0.2.1.0** |
+| **`v0.5.10.2`** | — | **0.5.10.2** | 本提交（未打标签） | **折跃界面朗读节点标题**（`NodeData.description`），不再念预制体实例名 `JumpPrefab (12)` |
 | — | — | 1.0.0 / 1.2.0 | — | 未单独打标签。1.0.0 是 `5e43d63` 之前的工作版；1.2.0 的改动并入 `3ee52a3` |
+
+---
+
+## v0.5.10.2 —— 折跃界面朗读节点标题，而不是预制体编号
+
+**面向「在折跃界面里用 Tab 挑节点，只听得到 `JumpPrefab (12)`」的玩家。**
+
+### 一、问题
+
+折跃（JumpBP）界面的每个节点是一张**纯图片按钮**：预制体上的 `NodePrefab`
+组件只有 `Image` / `Button` / `CanvasGroup`，没有 `Text` 也没有
+`TextMeshProUGUI`。模组取标签的已有回退链是「自身子树文本 → 同一行 / 祖先里
+的文本 → 对象名」，前两级在节点上必然是空的，于是落到第三级，念出来的是
+**预制体实例名**：
+
+```
+JumpPrefab
+JumpPrefab (1)
+JumpPrefab (12)
+```
+
+这有两层问题：一是不是标题，玩家听不出这一节点是第几章；二是这个数字
+**不代表节点序号** —— 它只是 Unity 给同名实例的编号，可见列表里第 3 项可能是
+`JumpPrefab (1)`，也可能直接跳到 `JumpPrefab (18)`，取决于本周目解锁了哪些节点。
+
+### 二、标题其实就在数据里，只是游戏从不在界面上显示
+
+`NodeData.description` 存的就是章节标题。离线解析游戏的
+`level3`（Dialog 场景）与 `level5`（Dialog2 场景）内置序列化文件，50 个
+`JumpPrefab` 实例上内联的 `NodeData` 里，`nodeID` 1..50 的 `description`
+**全部非空、无一空串**，例如：
+
+> **剧透保护**：本节的章节标题一律以 Base64（UTF-8）给出，不直接写标题。
+> 解码：`[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("…"))`
+> 下文其它出现标题的地方同样处理。
+
+| `nodeID` | `description`（Base64） |
+|---|---|
+| 1 | `5bqP56ugICBDR++8geaIkeeci+WIsOS6hkNH77yB` |
+| 12 | `56ys5Y2B56ugICDmsonmsqY=` |
+| 45 | `56ys5LqU56ugICDlnKPngavllrXllrXkv53ljavmiJg=` |
+| 46 | `56ys5YWt56ugICDor5fkuI7mrYw=` |
+| 49 | `5Lyq57uI56ugICDnnJ/mmJ/kuLrkvaA=` |
+| 50 | `56ys5Zub5ZGo55uuICDlhbHpgJrnur8y` |
+
+既然数据里有，就不需要识别图片、也不需要猜文字。
+
+### 三、做法：反射读 `description`，只加一路标签来源
+
+在 `UiNav` 的标签链里，于「自身子树文本」之后、名字别名之前插一层：
+先试 `JumpNodeTitleOf(selectable)`，取到就用它当标签。
+
+- 类型用 `Type.GetType("NodePrefab, Assembly-CSharp")`，取不到再遍历
+  `AppDomain` 已加载程序集（沿用 `InputFieldRoleName` 那套容错写法）。
+- 一次探测失败就缓存「不可用」，之后不再反射 —— 不拖慢每次扫描。
+- 从控件往上最多 3 层找 `NodePrefab`（`Button` → 节点根）。
+- 读 `data.description`，`Norm()` 后非空即作为标签。
+- 任何一步失败（字段改名、读不到、抛异常）一律返回空串，**回到原来的回退链**
+  —— 最差也就是维持「念对象名」，不会崩、不会更糟。
+
+代价：反射只命中折跃节点；其它界面完全不受影响（`JumpNodeTitleOf` 在
+非折跃控件上返回空串）。字段名写死在源码里，游戏日后改结构时这一层会
+静默失效、退回旧行为。
+
+### 四、验证：实机，修复前后各跑一遍
+
+用临时探针插件（不入库、已删除）在同一台机器上加载真实存档、进折跃界面，
+直接取模组 `UiNav.TextOf` 的返回值：
+
+| 列表项 | 修复前 | 修复后 |
+|---|---|---|
+| 02 | `JumpPrefab` | `5bqP56ugICBDR++8geaIkeeci+WIsOS6hkNH77yB` |
+| 03 | `JumpPrefab (1)` | `56ys5LiA56ugICDkurrooqvmnYDlsLHkvJrmrbs=` |
+| 04 | `JumpPrefab (2)` | `56ys5LqM56ugICDlnY/kuobvvIHooqvlgbflrrbkuobvvIE=` |
+| 06 | `JumpPrefab (4)` | `56ys5Zub56ugICDlprnpnLjor5fokIw=` |
+| 12 | `JumpPrefab (39)` | `5Lyq5bqP56ugICDlr4znvo7lsJHlpbPniLHkuIrmiJE=` |
+| 16 | `JumpPrefab (43)` | `56ys5Zub56ugICDpgqPkuYjmuLjmiI/lvIDlp4vkuoY=` |
+
+当前解锁进度下可见的 16 个节点**全部**取到标题，没有一项退回对象名；
+同组的其它控件（返回按钮、菜单按钮、横向滚动条）标签保持不变。
+
+### 五、没动的地方
+
+同一组里还有 3 个非节点控件仍然念对象名：
+`Canvas/Panel/Button` 被念成 `Canvas`、`MenuButton` 念成 `MenuButton`、
+`Scrollbar Horizontal` 念成 `Scrollbar Horizontal`。它们分别是返回、菜单、
+横向滚动条——**用途是看层级结构推断的，没有逐个实机点过**，凭对象名硬猜一个
+中文标签比念英文名更容易误导，所以留下一版确认后再说。
+
+未解锁的节点（`canRegister = false`、`CanvasGroup.alpha = 0`）本来就被
+「只保留真的在画面上的控件」这一步过滤掉了，不在导航项里，因此不需要额外处理。
 
 ---
 
